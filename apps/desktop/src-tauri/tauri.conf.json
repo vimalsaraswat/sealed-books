@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "sealed-books",
+  "productName": "Sealed Books",
   "version": "0.1.0",
   "identifier": "com.vimalsaraswat.sealed-books",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "sealed-books",
+        "title": "Sealed Books",
         "width": 800,
         "height": 600
       }
