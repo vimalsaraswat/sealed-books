@@ -8,7 +8,8 @@ build/
 target/
 
 # Rust
-Cargo.lock
+# Cargo.lock IS committed: this workspace builds binaries (server, desktop),
+# and a committed lockfile is what makes their builds reproducible.
 
 # Environment files
 .env

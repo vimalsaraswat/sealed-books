@@ -92,9 +92,8 @@ anyone can check is the entire, deliberate scope.
 ## Notes
 
 - The workspace is on `edition = "2024"`, which needs a recent Rust toolchain.
-- The package is currently named `core`, which collides with Rust's built-in
-  `core` library and will need renaming (`sealed-books-core`) before other
-  crates depend on it.
+- Depend on this crate as `sealed-books-core.workspace = true`; the path is
+  declared once in the root `[workspace.dependencies]`.
 
 ## Status
 

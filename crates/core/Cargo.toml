@@ -1,6 +1,9 @@
 [package]
-name = "core"
-version = "0.1.0"
-edition = "2024"
+name = "sealed-books-core"
+description = "Canonical encoding, hashing, and verification for Sealed Books."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [dependencies]

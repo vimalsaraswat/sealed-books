@@ -1,6 +1,10 @@
 [package]
-name = "server"
-version = "0.1.0"
-edition = "2024"
+name = "sealed-books-server"
+description = "Ledger storage, seal publishing, and verification API for Sealed Books."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [dependencies]
+sealed-books-core.workspace = true
