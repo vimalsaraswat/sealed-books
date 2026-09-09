@@ -250,11 +250,35 @@ Resolve these during Phase 0, not later.
 
 ---
 
-## 11. Housekeeping
+## 11. Package naming
 
-- The `crates/core` package is currently named `core`, which collides with Rust's built-in `core` library. Rename to `sealed-books-core` before anything depends on it.
-- The workspace is on `edition = "2024"`; needs a recent Rust toolchain.
-- `crates/core` and `apps/server` are both empty scaffolding (`cargo new` boilerplate).
+Settled. Directory names stay short; package names are globally unambiguous.
+
+| Directory                | Rust crate                                              | npm package             |
+| ------------------------ | ------------------------------------------------------- | ----------------------- |
+| `crates/core`            | `sealed-books-core`                                     | —                       |
+| `apps/server`            | `sealed-books-server`                                   | —                       |
+| `apps/desktop/src-tauri` | `sealed-books-desktop` (lib `sealed_books_desktop_lib`) | —                       |
+| `apps/desktop`           | —                                                       | `@sealed-books/desktop` |
+| `apps/web`               | —                                                       | `@sealed-books/web`     |
+| `packages/ui`            | —                                                       | `@sealed-books/ui`      |
+| repository root          | workspace                                               | `sealed-books`          |
+
+Shared Rust metadata (`version`, `edition`, `license`, `authors`) is inherited
+from `[workspace.package]`. Shared dependencies live in
+`[workspace.dependencies]` — add a crate there once, then use
+`thing.workspace = true` in each member.
+
+### Also settled during the rename
+
+- `[profile.release]` moved from `apps/desktop/src-tauri/Cargo.toml` to the workspace root. Cargo silently ignores profiles declared in workspace members, so the Tauri release optimisations were never being applied. Note this now also applies `panic = "abort"` to the server; drop that line if unwinding is wanted there.
+- `Cargo.lock` is no longer gitignored. The workspace builds binaries, so the lockfile belongs in version control.
+- The Tauri crate moved from edition 2021 to the workspace's edition 2024. `cargo check --workspace` passes.
+
+### Still open
+
+- `crates/core` and `apps/server` are empty scaffolding (`cargo new` boilerplate).
+- `packages/ui` is scaffolded as a standalone Vite app (own `index.html`, `main.tsx`, `vite.config.ts`) rather than a library. Fine to leave, but it is not importable as a shared component package in its current shape.
 
 ---
 
