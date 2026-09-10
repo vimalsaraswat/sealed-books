@@ -7,3 +7,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
