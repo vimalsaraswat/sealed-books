@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "apps/server",
     "apps/desktop/src-tauri",
+    "tools/harness",
 ]
 
 [workspace.package]

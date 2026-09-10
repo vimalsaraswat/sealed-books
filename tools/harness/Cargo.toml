@@ -1,0 +1,20 @@
+[package]
+name = "harness"
+description = "Network and integration probe harness for Sealed Books (Hedera HCS, Privy)."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+hedera = "0.43.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+reqwest = { version = "0.12", features = ["json"] }
+dotenvy = "0.15"
+k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+hex = "0.4"
+base64 = "0.22"
+sha2 = "0.10"
+sha3 = "0.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
