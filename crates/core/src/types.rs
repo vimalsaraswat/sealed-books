@@ -199,8 +199,9 @@ pub enum VerifyResult {
     /// An entry was altered after sealing.
     EntryTampered {
         entry_id: String,
-        expected_hash: [u8; 32],
+        expected_hash: Option<[u8; 32]>,
         actual_hash: [u8; 32],
+        reason: String,
     },
 
     /// An entry was deleted that was present when the seal was created.
