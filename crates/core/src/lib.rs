@@ -7,9 +7,11 @@
 pub mod encode;
 pub mod error;
 pub mod hash;
+pub mod merkle;
 pub mod types;
 
 pub use encode::{CANONICAL_VERSION_V1, encode_entry, encode_statement};
 pub use error::CoreError;
 pub use hash::{hash_entry, hash_entry_unchecked, statement_hash};
+pub use merkle::{build_statement, merkle_root, sort_entries_canonically};
 pub use types::{Direction, Entry, Line, Period, SealStatement, VerifyResult};

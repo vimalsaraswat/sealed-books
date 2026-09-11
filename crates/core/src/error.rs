@@ -25,6 +25,16 @@ pub enum CoreError {
     #[error("Invalid period: start date '{start}' is after end date '{end}'")]
     InvalidPeriodRange { start: String, end: String },
 
+    #[error(
+        "Entry '{entry_id}' date '{entry_date}' is outside period range '{period_start}' -> '{period_end}'"
+    )]
+    EntryOutOfPeriodRange {
+        entry_id: String,
+        entry_date: String,
+        period_start: String,
+        period_end: String,
+    },
+
     #[error("Serialization error: {0}")]
     SerializationError(String),
 }
