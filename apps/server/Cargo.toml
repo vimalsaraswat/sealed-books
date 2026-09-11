@@ -6,5 +6,30 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[lib]
+name = "sealed_books_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sealed-books-server"
+path = "src/main.rs"
+
 [dependencies]
 sealed-books-core.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { version = "0.33", features = ["bundled"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+hex = "0.4"
+thiserror = "2.0"
+dotenvy = "0.15"
+axum = "0.7"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
