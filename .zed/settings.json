@@ -1,0 +1,28 @@
+{
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "linkedProjects": ["Cargo.toml"],
+        "cargo": {
+          "allTargets": true,
+          "loadOutDirsFromCheck": true,
+          "buildScripts": {
+            "enable": true,
+          },
+        },
+        "check": {
+          "command": "clippy",
+          "allTargets": true,
+        },
+        "procMacro": {
+          "enable": true,
+        },
+      },
+    },
+    "eslint": {
+      "initialization_options": {
+        "workingDirectory": { "mode": "auto" },
+      },
+    },
+  },
+}
