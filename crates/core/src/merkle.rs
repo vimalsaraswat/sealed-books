@@ -29,15 +29,15 @@ pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
     let mut current_layer: Vec<[u8; 32]> = leaves.to_vec();
 
     while current_layer.len() > 1 {
-        let mut next_layer = Vec::with_capacity((current_layer.len() + 1) / 2);
+        let mut next_layer = Vec::with_capacity(current_layer.len().div_ceil(2));
 
         for chunk in current_layer.chunks(2) {
             let left = chunk[0];
             let right = if chunk.len() == 2 { chunk[1] } else { chunk[0] };
 
             let mut hasher = Sha256::new();
-            hasher.update(&left);
-            hasher.update(&right);
+            hasher.update(left);
+            hasher.update(right);
             let digest = hasher.finalize();
 
             let mut parent = [0u8; 32];

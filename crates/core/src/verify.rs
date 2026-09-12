@@ -154,20 +154,21 @@ pub fn verify_with_known_hashes(
     for entry in current_entries {
         let current_hash = hash_entry_unchecked(entry);
         if let Some(&expected_hash) = baseline_map.get(entry.id.as_str()) {
-            if current_hash != expected_hash {
-                let reason = if let Err(err) = entry.validate() {
-                    err.to_string()
-                } else {
-                    "Entry content was altered after sealing".into()
-                };
-
-                return VerifyResult::EntryTampered {
-                    entry_id: entry.id.clone(),
-                    expected_hash: Some(expected_hash),
-                    actual_hash: current_hash,
-                    reason,
-                };
+            if current_hash == expected_hash {
+                continue;
             }
+            let reason = if let Err(err) = entry.validate() {
+                err.to_string()
+            } else {
+                "Entry content was altered after sealing".into()
+            };
+
+            return VerifyResult::EntryTampered {
+                entry_id: entry.id.clone(),
+                expected_hash: Some(expected_hash),
+                actual_hash: current_hash,
+                reason,
+            };
         }
     }
 
