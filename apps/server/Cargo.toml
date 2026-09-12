@@ -19,7 +19,7 @@ sealed-books-core.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rusqlite = { version = "0.33", features = ["bundled"] }
+libsql = { version = "0.9", features = ["remote"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 hex = "0.4"

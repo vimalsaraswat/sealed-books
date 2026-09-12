@@ -1,7 +1,7 @@
 //! User session model and database queries.
 
 use crate::db::error::DbError;
-use rusqlite::{Connection, params};
+use libsql::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,45 +14,47 @@ pub struct Session {
 
 impl Session {
     /// Inserts a new user session.
-    pub fn insert(&self, conn: &Connection) -> Result<(), DbError> {
+    pub async fn insert(&self, conn: &Connection) -> Result<(), DbError> {
         conn.execute(
             "INSERT INTO sessions (token, user_id, active_organization_id, expires_at)
              VALUES (?1, ?2, ?3, ?4);",
             params![
-                &self.token,
-                &self.user_id,
-                &self.active_organization_id,
-                &self.expires_at
+                self.token.as_str(),
+                self.user_id.as_str(),
+                self.active_organization_id.as_str(),
+                self.expires_at.as_str()
             ],
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Finds an active session by bearer token.
-    pub fn find_by_token(conn: &Connection, token: &str) -> Result<Self, DbError> {
-        conn.query_row(
-            "SELECT token, user_id, active_organization_id, expires_at
-             FROM sessions WHERE token = ?1;",
-            params![token],
-            |row| {
-                Ok(Session {
-                    token: row.get(0)?,
-                    user_id: row.get(1)?,
-                    active_organization_id: row.get(2)?,
-                    expires_at: row.get(3)?,
-                })
-            },
-        )
-        .map_err(|err| match err {
-            rusqlite::Error::QueryReturnedNoRows => {
-                DbError::EntityNotFound("Session not found or expired".into())
-            }
-            other => DbError::Sqlite(other),
-        })
+    pub async fn find_by_token(conn: &Connection, token: &str) -> Result<Self, DbError> {
+        let mut rows = conn
+            .query(
+                "SELECT token, user_id, active_organization_id, expires_at
+                 FROM sessions WHERE token = ?1;",
+                params![token],
+            )
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            Ok(Session {
+                token: row.get(0)?,
+                user_id: row.get(1)?,
+                active_organization_id: row.get(2)?,
+                expires_at: row.get(3)?,
+            })
+        } else {
+            Err(DbError::EntityNotFound(
+                "Session not found or expired".into(),
+            ))
+        }
     }
 
     /// Updates the active organization ID for this session.
-    pub fn update_active_org(
+    pub async fn update_active_org(
         conn: &Connection,
         token: &str,
         new_org_id: &str,
@@ -60,13 +62,15 @@ impl Session {
         conn.execute(
             "UPDATE sessions SET active_organization_id = ?1 WHERE token = ?2;",
             params![new_org_id, token],
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Deletes a session upon logout.
-    pub fn delete(conn: &Connection, token: &str) -> Result<(), DbError> {
-        conn.execute("DELETE FROM sessions WHERE token = ?1;", params![token])?;
+    pub async fn delete(conn: &Connection, token: &str) -> Result<(), DbError> {
+        conn.execute("DELETE FROM sessions WHERE token = ?1;", params![token])
+            .await?;
         Ok(())
     }
 }

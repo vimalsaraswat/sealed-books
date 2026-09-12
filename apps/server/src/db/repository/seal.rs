@@ -2,7 +2,7 @@
 
 use crate::db::error::DbError;
 use crate::db::repository::period::PeriodRecord;
-use rusqlite::{Connection, params};
+use libsql::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 fn default_dispatch_status() -> String {
@@ -31,7 +31,7 @@ pub struct SealRecord {
 
 impl SealRecord {
     /// Helper to map database rows to (SealRecord, PeriodRecord)
-    fn map_seal_and_period(row: &rusqlite::Row) -> rusqlite::Result<(SealRecord, PeriodRecord)> {
+    fn map_seal_and_period(row: &libsql::Row) -> Result<(SealRecord, PeriodRecord), libsql::Error> {
         Ok((
             SealRecord {
                 id: row.get(0)?,
@@ -62,7 +62,7 @@ impl SealRecord {
     }
 
     /// Inserts this seal record into the database.
-    pub fn insert(&self, conn: &Connection) -> Result<(), DbError> {
+    pub async fn insert(&self, conn: &Connection) -> Result<(), DbError> {
         conn.execute(
             "INSERT INTO seals (
                 id, period_id, root, statement_hash, topic_id, sequence_number,
@@ -71,32 +71,33 @@ impl SealRecord {
                 auditor_notes, created_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15);",
             params![
-                &self.id,
-                &self.period_id,
-                &self.root,
-                &self.statement_hash,
-                &self.topic_id,
-                &self.sequence_number,
-                &self.consensus_timestamp,
-                &self.approver_1_pubkey,
-                &self.approver_1_sig,
-                &self.approver_2_pubkey,
-                &self.approver_2_sig,
+                self.id.as_str(),
+                self.period_id.as_str(),
+                self.root.as_str(),
+                self.statement_hash.as_str(),
+                self.topic_id.as_deref(),
+                self.sequence_number,
+                self.consensus_timestamp.as_deref(),
+                self.approver_1_pubkey.as_deref(),
+                self.approver_1_sig.as_deref(),
+                self.approver_2_pubkey.as_deref(),
+                self.approver_2_sig.as_deref(),
                 if self.dispatch_status.is_empty() {
                     "draft"
                 } else {
-                    &self.dispatch_status
+                    self.dispatch_status.as_str()
                 },
-                &self.auditor_id,
-                &self.auditor_notes,
-                &self.created_at
+                self.auditor_id.as_deref(),
+                self.auditor_notes.as_deref(),
+                self.created_at.as_str()
             ],
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Inserts or updates this seal record (useful for progressive approvals and publishing).
-    pub fn upsert(&self, conn: &Connection) -> Result<(), DbError> {
+    pub async fn upsert(&self, conn: &Connection) -> Result<(), DbError> {
         conn.execute(
             "INSERT INTO seals (
                 id, period_id, root, statement_hash, topic_id, sequence_number,
@@ -118,32 +119,33 @@ impl SealRecord {
                 auditor_id = excluded.auditor_id,
                 auditor_notes = excluded.auditor_notes;",
             params![
-                &self.id,
-                &self.period_id,
-                &self.root,
-                &self.statement_hash,
-                &self.topic_id,
-                &self.sequence_number,
-                &self.consensus_timestamp,
-                &self.approver_1_pubkey,
-                &self.approver_1_sig,
-                &self.approver_2_pubkey,
-                &self.approver_2_sig,
+                self.id.as_str(),
+                self.period_id.as_str(),
+                self.root.as_str(),
+                self.statement_hash.as_str(),
+                self.topic_id.as_deref(),
+                self.sequence_number,
+                self.consensus_timestamp.as_deref(),
+                self.approver_1_pubkey.as_deref(),
+                self.approver_1_sig.as_deref(),
+                self.approver_2_pubkey.as_deref(),
+                self.approver_2_sig.as_deref(),
                 if self.dispatch_status.is_empty() {
                     "draft"
                 } else {
-                    &self.dispatch_status
+                    self.dispatch_status.as_str()
                 },
-                &self.auditor_id,
-                &self.auditor_notes,
-                &self.created_at
+                self.auditor_id.as_deref(),
+                self.auditor_notes.as_deref(),
+                self.created_at.as_str()
             ],
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Dispatches a seal to an external auditor for review.
-    pub fn dispatch_to_auditor(
+    pub async fn dispatch_to_auditor(
         conn: &Connection,
         period_id: &str,
         auditor_id: &str,
@@ -151,7 +153,7 @@ impl SealRecord {
         let rows = conn.execute(
             "UPDATE seals SET dispatch_status = 'pending_auditor', auditor_id = ?1 WHERE period_id = ?2;",
             params![auditor_id, period_id],
-        )?;
+        ).await?;
         if rows == 0 {
             return Err(DbError::SealNotFound(period_id.to_string()));
         }
@@ -159,11 +161,15 @@ impl SealRecord {
     }
 
     /// Rejects an audit proposal and returns feedback notes to the controller.
-    pub fn reject_audit(conn: &Connection, period_id: &str, notes: &str) -> Result<(), DbError> {
+    pub async fn reject_audit(
+        conn: &Connection,
+        period_id: &str,
+        notes: &str,
+    ) -> Result<(), DbError> {
         let rows = conn.execute(
             "UPDATE seals SET dispatch_status = 'rejected', auditor_notes = ?1 WHERE period_id = ?2;",
             params![notes, period_id],
-        )?;
+        ).await?;
         if rows == 0 {
             return Err(DbError::SealNotFound(period_id.to_string()));
         }
@@ -171,48 +177,49 @@ impl SealRecord {
     }
 
     /// Retrieves a seal record by its associated period ID.
-    pub fn find_by_period_id(conn: &Connection, period_id: &str) -> Result<Self, DbError> {
-        conn.query_row(
-            "SELECT id, period_id, root, statement_hash, topic_id, sequence_number,
-                    consensus_timestamp, approver_1_pubkey, approver_1_sig,
-                    approver_2_pubkey, approver_2_sig, dispatch_status, auditor_id,
-                    auditor_notes, created_at
-             FROM seals WHERE period_id = ?1;",
-            params![period_id],
-            |row| {
-                Ok(SealRecord {
-                    id: row.get(0)?,
-                    period_id: row.get(1)?,
-                    root: row.get(2)?,
-                    statement_hash: row.get(3)?,
-                    topic_id: row.get(4)?,
-                    sequence_number: row.get(5)?,
-                    consensus_timestamp: row.get(6)?,
-                    approver_1_pubkey: row.get(7)?,
-                    approver_1_sig: row.get(8)?,
-                    approver_2_pubkey: row.get(9)?,
-                    approver_2_sig: row.get(10)?,
-                    dispatch_status: row.get(11)?,
-                    auditor_id: row.get(12)?,
-                    auditor_notes: row.get(13)?,
-                    created_at: row.get(14)?,
-                })
-            },
-        )
-        .map_err(|err| match err {
-            rusqlite::Error::QueryReturnedNoRows => DbError::SealNotFound(period_id.to_string()),
-            other => DbError::Sqlite(other),
-        })
+    pub async fn find_by_period_id(conn: &Connection, period_id: &str) -> Result<Self, DbError> {
+        let mut rows = conn
+            .query(
+                "SELECT id, period_id, root, statement_hash, topic_id, sequence_number,
+                        consensus_timestamp, approver_1_pubkey, approver_1_sig,
+                        approver_2_pubkey, approver_2_sig, dispatch_status, auditor_id,
+                        auditor_notes, created_at
+                 FROM seals WHERE period_id = ?1;",
+                params![period_id],
+            )
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            Ok(SealRecord {
+                id: row.get(0)?,
+                period_id: row.get(1)?,
+                root: row.get(2)?,
+                statement_hash: row.get(3)?,
+                topic_id: row.get(4)?,
+                sequence_number: row.get(5)?,
+                consensus_timestamp: row.get(6)?,
+                approver_1_pubkey: row.get(7)?,
+                approver_1_sig: row.get(8)?,
+                approver_2_pubkey: row.get(9)?,
+                approver_2_sig: row.get(10)?,
+                dispatch_status: row.get(11)?,
+                auditor_id: row.get(12)?,
+                auditor_notes: row.get(13)?,
+                created_at: row.get(14)?,
+            })
+        } else {
+            Err(DbError::SealNotFound(period_id.to_string()))
+        }
     }
 
     /// Lists all periods currently pending review by an auditor.
-    pub fn list_pending_audits(
+    pub async fn list_pending_audits(
         conn: &Connection,
         auditor_id_opt: Option<&str>,
     ) -> Result<Vec<(Self, PeriodRecord)>, DbError> {
         let mut results = Vec::new();
         if let Some(auditor_id) = auditor_id_opt {
-            let mut stmt = conn.prepare(
+            let mut rows = conn.query(
                 "SELECT s.id, s.period_id, s.root, s.statement_hash, s.topic_id, s.sequence_number,
                         s.consensus_timestamp, s.approver_1_pubkey, s.approver_1_sig,
                         s.approver_2_pubkey, s.approver_2_sig, s.dispatch_status, s.auditor_id,
@@ -222,13 +229,13 @@ impl SealRecord {
                  JOIN periods p ON s.period_id = p.id
                  WHERE s.dispatch_status = 'pending_auditor' AND (s.auditor_id = ?1 OR s.auditor_id IS NULL)
                  ORDER BY s.created_at DESC;",
-            )?;
-            let rows = stmt.query_map(params![auditor_id], Self::map_seal_and_period)?;
-            for r in rows {
-                results.push(r?);
+                params![auditor_id],
+            ).await?;
+            while let Some(row) = rows.next().await? {
+                results.push(Self::map_seal_and_period(&row)?);
             }
         } else {
-            let mut stmt = conn.prepare(
+            let mut rows = conn.query(
                 "SELECT s.id, s.period_id, s.root, s.statement_hash, s.topic_id, s.sequence_number,
                         s.consensus_timestamp, s.approver_1_pubkey, s.approver_1_sig,
                         s.approver_2_pubkey, s.approver_2_sig, s.dispatch_status, s.auditor_id,
@@ -238,47 +245,47 @@ impl SealRecord {
                  JOIN periods p ON s.period_id = p.id
                  WHERE s.dispatch_status = 'pending_auditor'
                  ORDER BY s.created_at DESC;",
-            )?;
-            let rows = stmt.query_map([], Self::map_seal_and_period)?;
-            for r in rows {
-                results.push(r?);
+                (),
+            ).await?;
+            while let Some(row) = rows.next().await? {
+                results.push(Self::map_seal_and_period(&row)?);
             }
         }
         Ok(results)
     }
 
     /// Persists baseline leaf hashes for an accounting period.
-    pub fn save_leaves(
+    pub async fn save_leaves(
         conn: &Connection,
         period_id: &str,
         leaves: &[(String, [u8; 32])],
     ) -> Result<(), DbError> {
-        let mut stmt = conn.prepare(
-            "INSERT OR REPLACE INTO seal_leaves (period_id, entry_id, leaf_hash) VALUES (?1, ?2, ?3);",
-        )?;
         for (entry_id, leaf_bytes) in leaves {
             let hash_hex = format!("0x{}", hex::encode(leaf_bytes));
-            stmt.execute(params![period_id, entry_id, hash_hex])?;
+            conn.execute(
+                "INSERT OR REPLACE INTO seal_leaves (period_id, entry_id, leaf_hash) VALUES (?1, ?2, ?3);",
+                params![period_id, entry_id.as_str(), hash_hex.as_str()],
+            ).await?;
         }
         Ok(())
     }
 
     /// Retrieves all saved baseline leaf hashes for an accounting period.
-    pub fn get_leaves(
+    pub async fn get_leaves(
         conn: &Connection,
         period_id: &str,
     ) -> Result<Vec<(String, [u8; 32])>, DbError> {
-        let mut stmt =
-            conn.prepare("SELECT entry_id, leaf_hash FROM seal_leaves WHERE period_id = ?1 ORDER BY entry_id ASC;")?;
+        let mut rows = conn
+            .query(
+                "SELECT entry_id, leaf_hash FROM seal_leaves WHERE period_id = ?1 ORDER BY entry_id ASC;",
+                params![period_id],
+            )
+            .await?;
+
         let mut list = Vec::new();
-        let rows = stmt.query_map(params![period_id], |row| {
+        while let Some(row) = rows.next().await? {
             let entry_id: String = row.get(0)?;
             let leaf_hex: String = row.get(1)?;
-            Ok((entry_id, leaf_hex))
-        })?;
-
-        for row in rows {
-            let (entry_id, leaf_hex) = row?;
             let clean = leaf_hex.trim_start_matches("0x");
             if let Ok(bytes) = hex::decode(clean) {
                 if bytes.len() != 32 {
@@ -299,24 +306,28 @@ mod tests {
     use super::*;
     use crate::db::schema::migrate;
 
-    fn setup_test_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute("PRAGMA foreign_keys = ON;", []).unwrap();
-        migrate(&conn).unwrap();
+    async fn setup_test_db() -> Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON;", ()).await.unwrap();
+        migrate(&conn).await.unwrap();
         conn.execute(
             "INSERT OR IGNORE INTO organizations (id, name, base_currency, created_at) VALUES ('org_acme', 'Acme', 'USD', '2026-08-01T00:00:00Z');",
-            [],
-        ).unwrap();
+            (),
+        ).await.unwrap();
         conn.execute(
             "INSERT INTO periods (id, organization_id, entity, start_date, end_date, status) VALUES ('per_2026_08', 'org_acme', 'Acme Corp', '2026-08-01', '2026-08-31', 'open');",
-            [],
-        ).unwrap();
+            (),
+        ).await.unwrap();
         conn
     }
 
-    #[test]
-    fn test_insert_and_find_seal() {
-        let conn = setup_test_db();
+    #[tokio::test]
+    async fn test_insert_and_find_seal() {
+        let conn = setup_test_db().await;
         let seal = SealRecord {
             id: "seal_1".into(),
             period_id: "per_2026_08".into(),
@@ -335,19 +346,30 @@ mod tests {
             created_at: "2026-09-01T12:00:00Z".into(),
         };
 
-        seal.insert(&conn).unwrap();
-        let fetched = SealRecord::find_by_period_id(&conn, "per_2026_08").unwrap();
+        seal.insert(&conn).await.unwrap();
+        let fetched = SealRecord::find_by_period_id(&conn, "per_2026_08")
+            .await
+            .unwrap();
         assert_eq!(fetched, seal);
     }
 
-    #[test]
-    fn test_duplicate_seal_insert_rejected() {
-        let conn = setup_test_db();
+    #[tokio::test]
+    async fn test_find_nonexistent_seal_returns_seal_not_found() {
+        let conn = setup_test_db().await;
+        let err = SealRecord::find_by_period_id(&conn, "per_nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::SealNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_seal_insert_rejected() {
+        let conn = setup_test_db().await;
         let seal1 = SealRecord {
             id: "seal_1".into(),
             period_id: "per_2026_08".into(),
-            root: "0x1234".into(),
-            statement_hash: "0x5678".into(),
+            root: "0x1111".into(),
+            statement_hash: "0x2222".into(),
             topic_id: None,
             sequence_number: None,
             consensus_timestamp: None,
@@ -360,13 +382,13 @@ mod tests {
             auditor_notes: None,
             created_at: "2026-09-01T12:00:00Z".into(),
         };
-        seal1.insert(&conn).unwrap();
+        seal1.insert(&conn).await.unwrap();
 
         let seal2 = SealRecord {
             id: "seal_2".into(),
             period_id: "per_2026_08".into(),
-            root: "0xabcd".into(),
-            statement_hash: "0xef01".into(),
+            root: "0x3333".into(),
+            statement_hash: "0x4444".into(),
             topic_id: None,
             sequence_number: None,
             consensus_timestamp: None,
@@ -377,25 +399,25 @@ mod tests {
             dispatch_status: "draft".into(),
             auditor_id: None,
             auditor_notes: None,
-            created_at: "2026-09-01T12:00:00Z".into(),
+            created_at: "2026-09-01T13:00:00Z".into(),
         };
-        let err = seal2.insert(&conn).unwrap_err();
+        let err = seal2.insert(&conn).await.unwrap_err();
         assert!(matches!(err, DbError::Sqlite(_)));
     }
 
-    #[test]
-    fn test_seal_upsert_updates_fields() {
-        let conn = setup_test_db();
+    #[tokio::test]
+    async fn test_seal_upsert_updates_fields() {
+        let conn = setup_test_db().await;
         let mut seal = SealRecord {
             id: "seal_1".into(),
             period_id: "per_2026_08".into(),
-            root: "0x1234".into(),
-            statement_hash: "0x5678".into(),
+            root: "0x1111".into(),
+            statement_hash: "0x2222".into(),
             topic_id: None,
             sequence_number: None,
             consensus_timestamp: None,
-            approver_1_pubkey: None,
-            approver_1_sig: None,
+            approver_1_pubkey: Some("0xpub1".into()),
+            approver_1_sig: Some("0xsig1".into()),
             approver_2_pubkey: None,
             approver_2_sig: None,
             dispatch_status: "draft".into(),
@@ -403,38 +425,42 @@ mod tests {
             auditor_notes: None,
             created_at: "2026-09-01T12:00:00Z".into(),
         };
-        seal.insert(&conn).unwrap();
+        seal.insert(&conn).await.unwrap();
 
-        seal.topic_id = Some("0.0.9999".into());
-        seal.sequence_number = Some(101);
-        seal.dispatch_status = "sealed".into();
-        seal.upsert(&conn).unwrap();
+        // Update with approver 2 and Hedera publication info
+        seal.approver_2_pubkey = Some("0xpub2".into());
+        seal.approver_2_sig = Some("0xsig2".into());
+        seal.topic_id = Some("0.0.99999".into());
+        seal.sequence_number = Some(7);
+        seal.consensus_timestamp = Some("2026-09-01T15:00:00Z".into());
 
-        let updated = SealRecord::find_by_period_id(&conn, "per_2026_08").unwrap();
-        assert_eq!(updated.topic_id, Some("0.0.9999".into()));
-        assert_eq!(updated.sequence_number, Some(101));
-        assert_eq!(updated.dispatch_status, "sealed");
+        seal.upsert(&conn).await.unwrap();
+
+        let fetched = SealRecord::find_by_period_id(&conn, "per_2026_08")
+            .await
+            .unwrap();
+        assert_eq!(fetched.approver_2_pubkey, Some("0xpub2".into()));
+        assert_eq!(fetched.sequence_number, Some(7));
+        assert_eq!(fetched.topic_id, Some("0.0.99999".into()));
     }
 
-    #[test]
-    fn test_find_nonexistent_seal_returns_seal_not_found() {
-        let conn = setup_test_db();
-        let err = SealRecord::find_by_period_id(&conn, "per_missing").unwrap_err();
-        assert!(matches!(err, DbError::SealNotFound(_)));
-    }
-
-    #[test]
-    fn test_seal_leaves_save_and_get() {
-        let conn = setup_test_db();
+    #[tokio::test]
+    async fn test_seal_leaves_save_and_get() {
+        let conn = setup_test_db().await;
         let leaves = vec![
-            ("ent_1".to_string(), [1u8; 32]),
-            ("ent_2".to_string(), [2u8; 32]),
+            ("ent_01".to_string(), [1u8; 32]),
+            ("ent_02".to_string(), [2u8; 32]),
         ];
-        SealRecord::save_leaves(&conn, "per_2026_08", &leaves).unwrap();
 
-        let list = SealRecord::get_leaves(&conn, "per_2026_08").unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].0, "ent_1");
-        assert_eq!(list[0].1, [1u8; 32]);
+        SealRecord::save_leaves(&conn, "per_2026_08", &leaves)
+            .await
+            .unwrap();
+        let loaded = SealRecord::get_leaves(&conn, "per_2026_08").await.unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].0, "ent_01");
+        assert_eq!(loaded[0].1, [1u8; 32]);
+        assert_eq!(loaded[1].0, "ent_02");
+        assert_eq!(loaded[1].1, [2u8; 32]);
     }
 }

@@ -1,7 +1,7 @@
 //! User identity model and database queries.
 
 use crate::db::error::DbError;
-use rusqlite::{Connection, params};
+use libsql::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,87 +16,91 @@ pub struct User {
 
 impl User {
     /// Inserts a new user into the database.
-    pub fn insert(&self, conn: &Connection) -> Result<(), DbError> {
+    pub async fn insert(&self, conn: &Connection) -> Result<(), DbError> {
         conn.execute(
             "INSERT INTO users (id, email, name, pubkey, eth_address, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
             params![
-                &self.id,
-                &self.email,
-                &self.name,
-                &self.pubkey,
-                &self.eth_address,
-                &self.created_at
+                self.id.as_str(),
+                self.email.as_str(),
+                self.name.as_str(),
+                self.pubkey.as_str(),
+                self.eth_address.as_str(),
+                self.created_at.as_str()
             ],
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Finds a user by their unique user ID.
-    pub fn find_by_id(conn: &Connection, id: &str) -> Result<Self, DbError> {
-        conn.query_row(
-            "SELECT id, email, name, pubkey, eth_address, created_at FROM users WHERE id = ?1;",
-            params![id],
-            |row| {
-                Ok(User {
-                    id: row.get(0)?,
-                    email: row.get(1)?,
-                    name: row.get(2)?,
-                    pubkey: row.get(3)?,
-                    eth_address: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            },
-        )
-        .map_err(|err| match err {
-            rusqlite::Error::QueryReturnedNoRows => {
-                DbError::EntityNotFound(format!("User not found: {id}"))
-            }
-            other => DbError::Sqlite(other),
-        })
+    pub async fn find_by_id(conn: &Connection, id: &str) -> Result<Self, DbError> {
+        let mut rows = conn
+            .query(
+                "SELECT id, email, name, pubkey, eth_address, created_at FROM users WHERE id = ?1;",
+                params![id],
+            )
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            Ok(User {
+                id: row.get(0)?,
+                email: row.get(1)?,
+                name: row.get(2)?,
+                pubkey: row.get(3)?,
+                eth_address: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        } else {
+            Err(DbError::EntityNotFound(format!("User not found: {id}")))
+        }
     }
 
     /// Finds a user by their unique email address.
-    pub fn find_by_email(conn: &Connection, email: &str) -> Result<Self, DbError> {
-        conn.query_row(
-            "SELECT id, email, name, pubkey, eth_address, created_at FROM users WHERE email = ?1;",
-            params![email],
-            |row| {
-                Ok(User {
-                    id: row.get(0)?,
-                    email: row.get(1)?,
-                    name: row.get(2)?,
-                    pubkey: row.get(3)?,
-                    eth_address: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            },
-        )
-        .map_err(|err| match err {
-            rusqlite::Error::QueryReturnedNoRows => {
-                DbError::EntityNotFound(format!("User with email '{email}' not found"))
-            }
-            other => DbError::Sqlite(other),
-        })
+    pub async fn find_by_email(conn: &Connection, email: &str) -> Result<Self, DbError> {
+        let mut rows = conn
+            .query(
+                "SELECT id, email, name, pubkey, eth_address, created_at FROM users WHERE email = ?1;",
+                params![email],
+            )
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            Ok(User {
+                id: row.get(0)?,
+                email: row.get(1)?,
+                name: row.get(2)?,
+                pubkey: row.get(3)?,
+                eth_address: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        } else {
+            Err(DbError::EntityNotFound(format!(
+                "User with email '{email}' not found"
+            )))
+        }
     }
 
     /// Lists all registered users.
-    pub fn list_all(conn: &Connection) -> Result<Vec<Self>, DbError> {
-        let mut stmt = conn.prepare(
-            "SELECT id, email, name, pubkey, eth_address, created_at FROM users ORDER BY name ASC;",
-        )?;
-        let users = stmt
-            .query_map([], |row| {
-                Ok(User {
-                    id: row.get(0)?,
-                    email: row.get(1)?,
-                    name: row.get(2)?,
-                    pubkey: row.get(3)?,
-                    eth_address: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+    pub async fn list_all(conn: &Connection) -> Result<Vec<Self>, DbError> {
+        let mut rows = conn
+            .query(
+                "SELECT id, email, name, pubkey, eth_address, created_at FROM users ORDER BY name ASC;",
+                (),
+            )
+            .await?;
+
+        let mut users = Vec::new();
+        while let Some(row) = rows.next().await? {
+            users.push(User {
+                id: row.get(0)?,
+                email: row.get(1)?,
+                name: row.get(2)?,
+                pubkey: row.get(3)?,
+                eth_address: row.get(4)?,
+                created_at: row.get(5)?,
+            });
+        }
         Ok(users)
     }
 }
