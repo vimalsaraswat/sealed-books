@@ -1,6 +1,9 @@
 // Styles
 import "./globals.css";
 
+// Types
+export * from "./types";
+
 // Primitives
 export * from "./components/ui/button";
 export * from "./components/ui/badge";
@@ -17,6 +20,7 @@ export * from "./components/ui/popover";
 export * from "./components/ui/calendar";
 export * from "./components/ui/date-picker";
 export * from "./components/ui/mode-toggle";
+export * from "./components/ui/BrandLogo";
 
 // Contexts & State Providers
 export * from "./context/AuthContext";
@@ -26,6 +30,8 @@ export * from "./context/ThemeContext";
 
 // Layout & Views
 export * from "./components/layout/Navbar";
+export * from "./components/layout/Header";
+export * from "./components/layout/Sidebar";
 export * from "./components/layout/Footer";
 export * from "./components/layout/ModalsContainer";
 export * from "./components/views/DashboardLayout";
@@ -49,4 +55,3 @@ export * from "./components/domain/TamperSimulatorDialog";
 // Utilities & Signer
 export * from "./lib/utils";
 export * from "./lib/signer";
-export * from "./types";

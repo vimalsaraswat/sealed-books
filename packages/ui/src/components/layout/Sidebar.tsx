@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  Lock,
   Building2,
   ChevronDown,
   Check,
@@ -16,6 +15,7 @@ import {
 } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { BrandLogo } from "../ui/BrandLogo";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -59,7 +59,12 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
     setTimeout(() => setCopiedAddr(false), 1500);
   };
 
-  const navItems: { id: NavTab; label: string; icon: React.ElementType; badge?: number }[] = [
+  const navItems: {
+    id: NavTab;
+    label: string;
+    icon: React.ElementType;
+    badge?: number;
+  }[] = [
     { id: "overview", label: "Overview", icon: LayoutDashboard },
     { id: "ledger", label: "General Ledger", icon: BookOpen },
     { id: "financials", label: "Financials", icon: Scale },
@@ -67,7 +72,10 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
       id: "audit",
       label: "Audit & Consensus",
       icon: ShieldCheck,
-      badge: userRole === "auditor" && pendingAudits.length > 0 ? pendingAudits.length : undefined,
+      badge:
+        userRole === "auditor" && pendingAudits.length > 0
+          ? pendingAudits.length
+          : undefined,
     },
     { id: "team", label: "Team & Governance", icon: Users },
   ];
@@ -110,9 +118,7 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
           {/* Brand Row */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <div className="size-8 rounded-lg bg-primary text-primary-foreground flex items-center justify-center shadow-xs">
-                <Lock className="size-4.5" />
-              </div>
+              <BrandLogo size="sm" />
               <div>
                 <div className="flex items-center gap-1.5">
                   <span className="font-bold text-sm tracking-tight text-foreground">
@@ -123,87 +129,90 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
                   </span>
                 </div>
                 <p className="text-[10px] text-muted-foreground font-mono">
-                  Autonomous Accounting
+                  Multi-Party Ledger
                 </p>
               </div>
             </div>
 
             {/* Mobile Close Button */}
-            <button
-              onClick={onMobileClose}
-              className="md:hidden p-1.5 text-muted-foreground hover:text-foreground"
-            >
-              <X className="size-4" />
-            </button>
+            {mobileOpen && (
+              <button
+                onClick={onMobileClose}
+                className="md:hidden p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+              >
+                <X className="size-4.5" />
+              </button>
+            )}
           </div>
 
-          {/* Organization Switcher Dropdown */}
-          {activeOrg && (
+          {/* Tenant Context Selector */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between px-0.5">
+              <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
+                Organization
+              </span>
+              <span className="text-[10px] font-mono text-muted-foreground">
+                {activeOrg?.base_currency || "USD"}
+              </span>
+            </div>
+
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button className="w-full flex items-center justify-between p-2 rounded-lg border border-border/70 bg-muted/40 hover:bg-muted/70 transition-colors text-left group">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="size-7 rounded bg-background border border-border/60 flex items-center justify-center shrink-0 text-muted-foreground group-hover:text-foreground">
+                <button className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-border bg-background/60 hover:bg-accent/50 text-left transition-colors cursor-pointer group">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="size-5 rounded-md bg-primary/10 text-primary flex items-center justify-center shrink-0">
                       <Building2 className="size-3.5" />
                     </div>
-                    <div className="min-w-0">
-                      <p className="text-xs font-bold text-foreground truncate">
-                        {activeOrg.name}
-                      </p>
-                      <p className="text-[10px] font-mono uppercase text-muted-foreground">
-                        {userRole}
-                      </p>
-                    </div>
+                    <span className="text-xs font-semibold text-foreground truncate">
+                      {activeOrg?.name || "Select Organization"}
+                    </span>
                   </div>
-                  <ChevronDown className="size-3.5 text-muted-foreground shrink-0 ml-1" />
+                  <ChevronDown className="size-3.5 text-muted-foreground group-hover:text-foreground shrink-0 transition-transform" />
                 </button>
               </DropdownMenuTrigger>
-
-              <DropdownMenuContent align="start" className="w-60">
-                <DropdownMenuLabel className="text-[10px] uppercase font-mono tracking-wider">
-                  Select Organization Vault
+              <DropdownMenuContent align="start" className="w-56">
+                <DropdownMenuLabel className="text-xs text-muted-foreground">
+                  Switch Organization
                 </DropdownMenuLabel>
+                <DropdownMenuSeparator />
                 {availableOrgs.map((org) => {
-                  const isSelected = org.id === activeOrg.id;
+                  const isCurrent = org.id === activeOrg?.id;
                   return (
                     <DropdownMenuItem
                       key={org.id}
                       onClick={() => switchOrg(org.id)}
-                      className="justify-between text-xs cursor-pointer"
+                      className="flex items-center justify-between cursor-pointer py-1.5"
                     >
-                      <span className="truncate font-medium">{org.name}</span>
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] font-mono text-muted-foreground uppercase">
-                          {org.role}
-                        </span>
-                        {isSelected && <Check className="size-3 text-primary" />}
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Building2 className="size-3.5 text-muted-foreground shrink-0" />
+                        <span className="text-xs truncate">{org.name}</span>
                       </div>
+                      {isCurrent && (
+                        <Check className="size-3.5 text-primary shrink-0" />
+                      )}
                     </DropdownMenuItem>
                   );
                 })}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={() => setIsCreateOrgOpen(true)}
-                  className="gap-2 text-xs cursor-pointer text-primary focus:text-primary"
+                  className="flex items-center gap-2 text-primary cursor-pointer text-xs"
                 >
                   <Plus className="size-3.5" />
                   <span>Create Organization</span>
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-          )}
+          </div>
         </div>
 
         {/* =========================================================
-            MIDDLE SECTION: Vertical Workspaces Navigation
+            MIDDLE SECTION: Main Navigation Links
             ========================================================= */}
-        <div className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-          <div className="px-2 pb-2">
-            <span className="text-[10px] font-mono uppercase font-semibold text-muted-foreground tracking-wider">
-              Workspaces
-            </span>
+        <div className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+          <div className="px-2 pb-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+            Ledger & Consensus
           </div>
-
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
@@ -211,27 +220,29 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
               <button
                 key={item.id}
                 onClick={() => handleSelectTab(item.id)}
-                className={`w-full flex items-center justify-between px-3 py-2 text-xs font-medium rounded-lg transition-all ${
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors cursor-pointer group ${
                   isActive
                     ? "bg-primary text-primary-foreground font-semibold shadow-xs"
-                    : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                    : "text-muted-foreground hover:text-foreground hover:bg-accent/60"
                 }`}
               >
-                <div className="flex items-center gap-2.5">
-                  <Icon className="size-4 shrink-0" />
-                  <span>{item.label}</span>
-                </div>
-
-                {item.badge !== undefined && (
-                  <span
-                    className={`px-1.5 py-0.2 rounded-full font-mono font-bold text-[10px] ${
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Icon
+                    className={`size-4 shrink-0 transition-colors ${
                       isActive
-                        ? "bg-white/20 text-white"
-                        : "bg-amber-500/20 text-amber-700 dark:text-amber-300 animate-pulse"
+                        ? "text-primary-foreground"
+                        : "text-muted-foreground group-hover:text-foreground"
                     }`}
+                  />
+                  <span className="truncate">{item.label}</span>
+                </div>
+                {item.badge !== undefined && (
+                  <Badge
+                    variant={isActive ? "secondary" : "destructive"}
+                    className="text-[10px] px-1.5 py-0 rounded-full shrink-0"
                   >
                     {item.badge}
-                  </span>
+                  </Badge>
                 )}
               </button>
             );
@@ -239,62 +250,56 @@ export function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {
         </div>
 
         {/* =========================================================
-            BOTTOM SECTION: User Card & Sign Out
+            BOTTOM SECTION: User Identity & Ledger Anchors
             ========================================================= */}
-        <div className="p-3 border-t border-border/70 space-y-2">
-          {currentUser && (
-            <div className="p-2.5 rounded-lg border border-border/60 bg-muted/30 space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="size-7 rounded-full bg-primary/15 text-primary border border-primary/20 flex items-center justify-center font-bold text-[10px] shrink-0">
-                    {userInitials}
-                  </div>
-                  <div className="min-w-0">
-                    <p className="text-xs font-bold text-foreground truncate">
-                      {currentUser.name}
-                    </p>
-                    <p className="text-[10px] text-muted-foreground font-mono truncate">
-                      {currentUser.email}
-                    </p>
-                  </div>
-                </div>
-
-                <Badge
-                  variant="outline"
-                  className="text-[9px] font-mono uppercase py-0 shrink-0"
-                >
-                  {userRole}
-                </Badge>
+        <div className="p-3 border-t border-border/70 space-y-3 bg-card">
+          {/* User Profile Card */}
+          <div className="p-2.5 rounded-lg border border-border/70 bg-background/50 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="size-8 rounded-full bg-primary/10 text-primary border border-primary/20 flex items-center justify-center font-bold text-xs shrink-0">
+                {userInitials}
               </div>
-
-              {currentUser.eth_address && (
-                <div className="flex items-center justify-between p-1.5 rounded bg-background border border-border/40 font-mono text-[10px] text-muted-foreground">
-                  <span>{truncateAddress(currentUser.eth_address)}</span>
-                  <button
-                    onClick={handleCopyAddress}
-                    title="Copy Ethereum address"
-                    className="hover:text-foreground inline-flex items-center gap-1"
-                  >
-                    {copiedAddr ? (
-                      <Check className="size-3 text-emerald-500" />
-                    ) : (
-                      <Copy className="size-3" />
-                    )}
-                  </button>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-foreground truncate">
+                  {currentUser?.name || "Accounting Officer"}
                 </div>
-              )}
-
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => logout()}
-                className="w-full h-7 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 justify-start gap-2 px-2"
-              >
-                <LogOut className="size-3.5" />
-                <span>Sign Out</span>
-              </Button>
+                <div className="flex items-center gap-1.5">
+                  <Badge
+                    variant="outline"
+                    className="text-[9px] px-1 py-0 h-4 capitalize font-mono text-muted-foreground bg-muted/40"
+                  >
+                    {userRole || "viewer"}
+                  </Badge>
+                  {currentUser?.eth_address && (
+                    <button
+                      onClick={handleCopyAddress}
+                      title="Copy Public Signing Address"
+                      className="text-[10px] font-mono text-muted-foreground hover:text-foreground flex items-center gap-0.5 cursor-pointer"
+                    >
+                      <span>{truncateAddress(currentUser.eth_address)}</span>
+                      <Copy className="size-2.5" />
+                      {copiedAddr && (
+                        <span className="text-[9px] text-emerald-500 font-sans">
+                          ✓
+                        </span>
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
-          )}
+
+            {/* Logout Icon Button */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={logout}
+              title="Sign Out"
+              className="size-7 text-muted-foreground hover:text-destructive shrink-0 cursor-pointer"
+            >
+              <LogOut className="size-3.5" />
+            </Button>
+          </div>
         </div>
       </aside>
     </>

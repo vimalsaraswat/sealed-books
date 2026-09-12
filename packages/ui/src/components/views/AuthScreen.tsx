@@ -1,6 +1,5 @@
 import { useState, type FormEvent } from "react";
 import {
-  ShieldCheck,
   Mail,
   ArrowRight,
   ArrowLeft,
@@ -13,6 +12,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Card, CardContent } from "../ui/card";
+import { BrandLogo } from "../ui/BrandLogo";
 import {
   InputOTP,
   InputOTPGroup,
@@ -96,10 +96,8 @@ export function AuthScreen() {
 
       <div className="relative w-full max-w-[420px] space-y-6 z-10">
         {/* Brand Header */}
-        <div className="text-center space-y-2.5">
-          <div className="size-11 rounded-xl bg-primary/10 border border-primary/20 text-primary flex items-center justify-center mx-auto shadow-xs">
-            <ShieldCheck className="size-6" />
-          </div>
+        <div className="text-center space-y-3">
+          <BrandLogo size="lg" className="mx-auto shadow-md" />
           <div className="space-y-1">
             <h1 className="text-xl font-semibold tracking-tight text-foreground">
               Sealed Books
@@ -128,26 +126,32 @@ export function AuthScreen() {
                     Work Email
                   </Label>
                   <div className="relative">
-                    <Mail className="size-4 text-muted-foreground absolute left-3.5 top-3" />
+                    <Mail className="size-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
                     <Input
                       type="email"
-                      placeholder="name@company.com"
+                      required
+                      placeholder="auditor@firm.com or cfo@corp.com"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      required
+                      className="pl-9 text-xs"
                       autoFocus
-                      className="pl-10 h-10 text-xs bg-background border-input text-foreground placeholder:text-muted-foreground focus-visible:ring-primary rounded-lg"
                     />
                   </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    We will dispatch a secure 6-digit verification code.
+                  </p>
                 </div>
 
                 <Button
                   type="submit"
                   disabled={loading || !email.trim()}
-                  className="w-full h-10 text-xs font-medium rounded-lg shadow-xs gap-2 transition-all"
+                  className="w-full text-xs font-semibold gap-2 cursor-pointer"
                 >
                   {loading ? (
-                    <Loader2 className="size-4 animate-spin" />
+                    <>
+                      <Loader2 className="size-3.5 animate-spin" />
+                      <span>Sending OTP...</span>
+                    </>
                   ) : (
                     <>
                       <span>Continue with Email</span>
@@ -155,130 +159,115 @@ export function AuthScreen() {
                     </>
                   )}
                 </Button>
-
-                <p className="text-[11px] text-center text-muted-foreground leading-relaxed pt-1">
-                  We will email a one-time secure verification code. New users
-                  receive a dedicated cryptographic ledger vault.
-                </p>
               </form>
             ) : (
-              /* Step 2: 6-Digit Shadcn InputOTP Verification */
+              /* Step 2: OTP Verification & Auto-Onboard */
               <form onSubmit={handleVerifyOtp} className="space-y-5">
-                <div className="space-y-1 text-center pb-1">
-                  <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-muted border border-border text-[11px] text-muted-foreground">
-                    <span>{email}</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setStep("email");
-                        setError(null);
-                        setOtpCode("");
-                      }}
-                      className="text-primary hover:underline font-medium ml-1"
-                    >
-                      Change
-                    </button>
-                  </div>
-                  <p className="text-xs text-muted-foreground pt-2">
-                    Enter the 6-digit security code sent to your email
-                  </p>
-                </div>
-
-                <div className="flex flex-col items-center justify-center space-y-2">
-                  <Label className="text-xs font-medium text-foreground self-start">
-                    Security Code
-                  </Label>
-                  <InputOTP
-                    maxLength={6}
-                    value={otpCode}
-                    onChange={(val) => setOtpCode(val)}
-                    autoFocus
-                  >
-                    <InputOTPGroup>
-                      <InputOTPSlot index={0} />
-                      <InputOTPSlot index={1} />
-                      <InputOTPSlot index={2} />
-                    </InputOTPGroup>
-                    <InputOTPSeparator />
-                    <InputOTPGroup>
-                      <InputOTPSlot index={3} />
-                      <InputOTPSlot index={4} />
-                      <InputOTPSlot index={5} />
-                    </InputOTPGroup>
-                  </InputOTP>
-                </div>
-
-                {/* If new user, show optional profile customization */}
-                {isNewUser && (
-                  <div className="space-y-3 pt-3 border-t border-border">
-                    <p className="text-[11px] text-muted-foreground font-medium">
-                      Create your organization vault:
-                    </p>
-                    <div className="space-y-1.5">
-                      <Label className="text-[11px] text-muted-foreground">
-                        Full Name (Optional)
-                      </Label>
-                      <div className="relative">
-                        <User className="size-3.5 text-muted-foreground absolute left-3 top-2.5" />
-                        <Input
-                          type="text"
-                          placeholder="Your Name"
-                          value={name}
-                          onChange={(e) => setName(e.target.value)}
-                          className="pl-9 h-8 text-xs bg-background border-input text-foreground placeholder:text-muted-foreground rounded-lg"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <Label className="text-[11px] text-muted-foreground">
-                        Organization Name (Optional)
-                      </Label>
-                      <div className="relative">
-                        <Building2 className="size-3.5 text-muted-foreground absolute left-3 top-2.5" />
-                        <Input
-                          type="text"
-                          placeholder="e.g. Acme Assurance Corp"
-                          value={orgName}
-                          onChange={(e) => setOrgName(e.target.value)}
-                          className="pl-9 h-8 text-xs bg-background border-input text-foreground placeholder:text-muted-foreground rounded-lg"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <Button
-                  type="submit"
-                  disabled={loading || otpCode.trim().length < 6}
-                  className="w-full h-10 text-xs font-medium rounded-lg shadow-xs gap-2 transition-all mt-1"
-                >
-                  {loading ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <span>Verify & Enter Vault</span>
-                  )}
-                </Button>
-
-                <div className="flex items-center justify-between text-xs text-muted-foreground pt-2">
+                <div className="flex items-center justify-between">
                   <button
                     type="button"
                     onClick={() => {
                       setStep("email");
                       setError(null);
                     }}
-                    className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+                    className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 cursor-pointer"
                   >
                     <ArrowLeft className="size-3" />
                     <span>Back</span>
                   </button>
+                  <span className="text-[11px] font-mono text-muted-foreground truncate max-w-[200px]">
+                    {email}
+                  </span>
+                </div>
+
+                {isNewUser && (
+                  <div className="p-3 bg-primary/5 border border-primary/20 rounded-lg space-y-3">
+                    <div className="text-xs font-semibold text-foreground">
+                      Welcome! Complete your profile:
+                    </div>
+                    <div className="space-y-2">
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">
+                          Your Full Name
+                        </Label>
+                        <div className="relative mt-1">
+                          <User className="size-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                          <Input
+                            type="text"
+                            placeholder="e.g. Alice Chen"
+                            value={name}
+                            onChange={(e) => setName(e.target.value)}
+                            className="pl-8 text-xs h-8"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <Label className="text-[11px] text-muted-foreground">
+                          Organization Name
+                        </Label>
+                        <div className="relative mt-1">
+                          <Building2 className="size-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                          <Input
+                            type="text"
+                            placeholder="e.g. Acme Corp"
+                            value={orgName}
+                            onChange={(e) => setOrgName(e.target.value)}
+                            className="pl-8 text-xs h-8"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-2 text-center">
+                  <Label className="text-xs font-medium text-foreground">
+                    Enter 6-Digit Verification Code
+                  </Label>
+                  <div className="flex justify-center pt-1">
+                    <InputOTP
+                      maxLength={6}
+                      value={otpCode}
+                      onChange={(val) => setOtpCode(val)}
+                    >
+                      <InputOTPGroup>
+                        <InputOTPSlot index={0} />
+                        <InputOTPSlot index={1} />
+                        <InputOTPSlot index={2} />
+                      </InputOTPGroup>
+                      <InputOTPSeparator />
+                      <InputOTPGroup>
+                        <InputOTPSlot index={3} />
+                        <InputOTPSlot index={4} />
+                        <InputOTPSlot index={5} />
+                      </InputOTPGroup>
+                    </InputOTP>
+                  </div>
+                </div>
+
+                <Button
+                  type="submit"
+                  disabled={loading || otpCode.trim().length < 6}
+                  className="w-full text-xs font-semibold gap-2 cursor-pointer"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="size-3.5 animate-spin" />
+                      <span>Verifying & Signing In...</span>
+                    </>
+                  ) : (
+                    <span>Authenticate Session</span>
+                  )}
+                </Button>
+
+                <div className="text-center pt-1">
                   <button
                     type="button"
                     onClick={handleResend}
                     disabled={loading}
-                    className="text-primary hover:underline transition-colors"
+                    className="text-[11px] text-muted-foreground hover:text-primary underline cursor-pointer disabled:opacity-50"
                   >
-                    Resend code
+                    Didn't receive code? Resend
                   </button>
                 </div>
               </form>
@@ -287,12 +276,10 @@ export function AuthScreen() {
         </Card>
 
         {/* Footnote */}
-        <div className="text-center space-y-1 text-[11px] text-muted-foreground">
-          <div className="flex items-center justify-center gap-1.5 font-mono">
-            <span className="size-1.5 rounded-full bg-emerald-500 inline-block animate-pulse" />
-            <span>Hedera Consensus Topic 0.0.10462941</span>
-          </div>
-          <div>Dual-Custody Cryptographic Audit Protocol</div>
+        <div className="text-center space-y-1">
+          <p className="text-[11px] text-muted-foreground font-mono">
+            Zero-knowledge ledger session backed by Hedera Consensus Service.
+          </p>
         </div>
       </div>
     </div>
