@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rusqlite::params;
+use libsql::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -63,8 +63,8 @@ pub async fn list_periods(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Vec<PeriodRecord>>, ApiError> {
-    let conn = state.db.lock();
-    let periods = PeriodRecord::list_by_org(&conn, &auth.active_organization.id)?;
+    let conn = state.db.conn();
+    let periods = PeriodRecord::list_by_org(conn, &auth.active_organization.id).await?;
     Ok(Json(periods))
 }
 
@@ -114,10 +114,8 @@ pub async fn post_period(
         status: "open".into(),
     };
 
-    {
-        let conn = state.db.lock();
-        record.insert(&conn)?;
-    }
+    let conn = state.db.conn();
+    record.insert(conn).await?;
 
     Ok((StatusCode::CREATED, Json(record)))
 }
@@ -127,8 +125,8 @@ pub async fn get_period(
     State(state): State<AppState>,
     Path(period_id): Path<String>,
 ) -> Result<Json<PeriodRecord>, ApiError> {
-    let conn = state.db.lock();
-    let period = PeriodRecord::find_by_id(&conn, &period_id)?;
+    let conn = state.db.conn();
+    let period = PeriodRecord::find_by_id(conn, &period_id).await?;
     Ok(Json(period))
 }
 
@@ -137,9 +135,9 @@ pub async fn get_period_statement(
     State(state): State<AppState>,
     Path(period_id): Path<String>,
 ) -> Result<Json<StatementResponse>, ApiError> {
-    let conn = state.db.lock();
-    let period = PeriodRecord::find_by_id(&conn, &period_id)?;
-    let entries = Entry::find_by_period(&conn, &period_id)?;
+    let conn = state.db.conn();
+    let period = PeriodRecord::find_by_id(conn, &period_id).await?;
+    let entries = Entry::find_by_period(conn, &period_id).await?;
 
     let core_period = period.to_core();
     let statement = build_statement(&core_period, &entries)?;
@@ -174,9 +172,9 @@ pub async fn tamper_period_handler(
     Path(period_id): Path<String>,
     Json(payload): Json<TamperEntryRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let conn = state.db.lock();
+    let conn = state.db.conn();
     // Verify period exists
-    let _ = PeriodRecord::find_by_id(&conn, &period_id)?;
+    let _ = PeriodRecord::find_by_id(conn, &period_id).await?;
 
     let new_desc = payload
         .new_description
@@ -185,8 +183,13 @@ pub async fn tamper_period_handler(
     let updated_rows = conn
         .execute(
             "UPDATE entries SET description = ?1 WHERE id = ?2 AND period_id = ?3;",
-            params![new_desc, payload.entry_id, period_id],
+            params![
+                new_desc.as_str(),
+                payload.entry_id.as_str(),
+                period_id.as_str()
+            ],
         )
+        .await
         .map_err(crate::db::error::DbError::Sqlite)?;
 
     if updated_rows == 0 {

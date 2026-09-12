@@ -29,8 +29,8 @@ pub async fn list_accounts(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Vec<Account>>, ApiError> {
-    let conn = state.db.lock();
-    let accounts = Account::list_by_org(&conn, &auth.active_organization.id)?;
+    let conn = state.db.conn();
+    let accounts = Account::list_by_org(conn, &auth.active_organization.id).await?;
     Ok(Json(accounts))
 }
 
@@ -73,10 +73,8 @@ pub async fn post_account(
         account_type,
     };
 
-    {
-        let conn = state.db.lock();
-        account.insert(&conn)?;
-    }
+    let conn = state.db.conn();
+    account.insert(conn).await?;
 
     Ok((StatusCode::CREATED, Json(account)))
 }

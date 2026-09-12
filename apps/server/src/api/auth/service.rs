@@ -9,7 +9,7 @@ use crate::db::repository::user::User;
 use chrono::Utc;
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::rand_core::OsRng;
-use rusqlite::Connection;
+use libsql::Connection;
 use sha3::{Digest, Keccak256};
 use uuid::Uuid;
 
@@ -59,7 +59,7 @@ pub fn derive_display_name(email: &str) -> String {
 }
 
 /// Provisions a new user, their default enterprise organization, owner membership, and active session.
-pub fn provision_user_and_workspace(
+pub async fn provision_user_and_workspace(
     conn: &Connection,
     email: &str,
     name_opt: Option<&str>,
@@ -71,7 +71,7 @@ pub fn provision_user_and_workspace(
     };
 
     let user = generate_user_identity(email, &name);
-    user.insert(conn)?;
+    user.insert(conn).await?;
 
     let org_name = match org_name_opt.filter(|s| !s.trim().is_empty()) {
         Some(o) => o.trim().to_string(),
@@ -85,7 +85,7 @@ pub fn provision_user_and_workspace(
         base_currency: "USD".into(),
         created_at: Utc::now().to_rfc3339(),
     };
-    org.insert(conn)?;
+    org.insert(conn).await?;
 
     let membership = Membership {
         id: format!("mem_{}_{}", org_id, user.id),
@@ -95,7 +95,7 @@ pub fn provision_user_and_workspace(
         status: "active".into(),
         created_at: Utc::now().to_rfc3339(),
     };
-    membership.insert(conn)?;
+    membership.insert(conn).await?;
 
     let token = format!(
         "sess_{}_{}",
@@ -108,7 +108,7 @@ pub fn provision_user_and_workspace(
         active_organization_id: org_id.clone(),
         expires_at: "2099-01-01T00:00:00Z".into(),
     };
-    session.insert(conn)?;
+    session.insert(conn).await?;
 
     Ok(LoginResponse {
         token,
@@ -125,11 +125,12 @@ pub fn provision_user_and_workspace(
 }
 
 /// Builds a LoginResponse for an existing user in their primary organization.
-pub fn build_login_response_for_user(
+pub async fn build_login_response_for_user(
     conn: &Connection,
     user: &User,
 ) -> Result<LoginResponse, ApiError> {
     let user_orgs = Organization::list_for_user(conn, &user.id)
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let (active_org, role) = if let Some(first) = user_orgs.first() {
@@ -143,7 +144,7 @@ pub fn build_login_response_for_user(
             base_currency: "USD".into(),
             created_at: Utc::now().to_rfc3339(),
         };
-        o.insert(conn)?;
+        o.insert(conn).await?;
 
         let m = Membership {
             id: format!("mem_{}_{}", org_id, user.id),
@@ -153,7 +154,7 @@ pub fn build_login_response_for_user(
             status: "active".into(),
             created_at: Utc::now().to_rfc3339(),
         };
-        m.insert(conn)?;
+        m.insert(conn).await?;
         (o, "owner".into())
     };
 
@@ -168,9 +169,10 @@ pub fn build_login_response_for_user(
         active_organization_id: active_org.id.clone(),
         expires_at: "2099-01-01T00:00:00Z".into(),
     };
-    session.insert(conn)?;
+    session.insert(conn).await?;
 
     let list = Organization::list_for_user(conn, &user.id)
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let summaries = list

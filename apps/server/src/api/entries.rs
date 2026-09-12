@@ -43,8 +43,8 @@ pub async fn list_entries(
     State(state): State<AppState>,
     Path(period_id): Path<String>,
 ) -> Result<Json<Vec<Entry>>, ApiError> {
-    let conn = state.db.lock();
-    let entries = <Entry as EntryExt>::find_by_period(&conn, &period_id)?;
+    let conn = state.db.conn();
+    let entries = <Entry as EntryExt>::find_by_period(conn, &period_id).await?;
     Ok(Json(entries))
 }
 
@@ -94,10 +94,8 @@ pub async fn post_entry(
         lines,
     };
 
-    {
-        let conn = state.db.lock();
-        entry.post_to(&conn, &period_id)?;
-    }
+    let conn = state.db.conn();
+    entry.post_to(conn, &period_id).await?;
 
     Ok((StatusCode::CREATED, Json(entry)))
 }

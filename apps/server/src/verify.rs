@@ -99,10 +99,12 @@ pub async fn verify_period(
 ) -> Result<VerificationReport, String> {
     // 1. Retrieve local seal record to get topic ID and sequence number
     let (_period, seal) = {
-        let conn = db.lock();
-        let p = PeriodRecord::find_by_id(&conn, period_id)
+        let conn = db.conn();
+        let p = PeriodRecord::find_by_id(conn, period_id)
+            .await
             .map_err(|e| format!("Period '{period_id}' not found: {e}"))?;
-        let s = SealRecord::find_by_period_id(&conn, period_id)
+        let s = SealRecord::find_by_period_id(conn, period_id)
+            .await
             .map_err(|e| format!("No seal found for period '{period_id}': {e}"))?;
         (p, s)
     };
@@ -170,10 +172,13 @@ pub async fn verify_period(
 
     // 5. Query current database state right now
     let (current_entries, baseline_leaves) = {
-        let conn = db.lock();
-        let entries = Entry::find_by_period(&conn, period_id)
+        let conn = db.conn();
+        let entries = Entry::find_by_period(conn, period_id)
+            .await
             .map_err(|e| format!("Failed to load current entries from DB: {e}"))?;
-        let leaves = SealRecord::get_leaves(&conn, period_id).unwrap_or_default();
+        let leaves = SealRecord::get_leaves(conn, period_id)
+            .await
+            .unwrap_or_default();
         (entries, leaves)
     };
 

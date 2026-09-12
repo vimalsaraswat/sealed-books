@@ -1,9 +1,9 @@
 //! SQLite DDL schemas, indexes, and migration runner for Sealed Books.
 
-use rusqlite::Connection;
+use libsql::Connection;
 
 /// Runs schema creation migrations.
-pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
+pub async fn migrate(conn: &Connection) -> Result<(), libsql::Error> {
     conn.execute_batch(
         "
         -- Organizations (Tenant isolation boundary)
@@ -117,23 +117,34 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
             PRIMARY KEY (period_id, entry_id)
         );
         ",
-    )?;
+    )
+    .await?;
 
-    // Safe backwards-compatible column migrations for existing local database files
-    let _ = conn.execute(
-        "ALTER TABLE accounts ADD COLUMN organization_id TEXT DEFAULT 'org_acme';",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE periods ADD COLUMN organization_id TEXT DEFAULT 'org_acme';",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE seals ADD COLUMN dispatch_status TEXT DEFAULT 'draft';",
-        [],
-    );
-    let _ = conn.execute("ALTER TABLE seals ADD COLUMN auditor_id TEXT;", []);
-    let _ = conn.execute("ALTER TABLE seals ADD COLUMN auditor_notes TEXT;", []);
+    // Safe backwards-compatible column migrations for existing database files
+    let _ = conn
+        .execute(
+            "ALTER TABLE accounts ADD COLUMN organization_id TEXT DEFAULT 'org_acme';",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute(
+            "ALTER TABLE periods ADD COLUMN organization_id TEXT DEFAULT 'org_acme';",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute(
+            "ALTER TABLE seals ADD COLUMN dispatch_status TEXT DEFAULT 'draft';",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute("ALTER TABLE seals ADD COLUMN auditor_id TEXT;", ())
+        .await;
+    let _ = conn
+        .execute("ALTER TABLE seals ADD COLUMN auditor_notes TEXT;", ())
+        .await;
 
     // Apply indexes after table definitions and column migrations
     conn.execute_batch(
@@ -149,7 +160,8 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_lines_account_id ON lines(account_id);
         CREATE INDEX IF NOT EXISTS idx_seal_leaves_period_id ON seal_leaves(period_id);
         ",
-    )?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -158,28 +170,35 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_migration_creates_all_tables() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute("PRAGMA foreign_keys = ON;", []).unwrap();
-        migrate(&conn).unwrap();
+    #[tokio::test]
+    async fn test_migration_creates_all_tables() {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON;", ()).await.unwrap();
+        migrate(&conn).await.unwrap();
 
-        let tables: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
-                .unwrap();
-            let rows = stmt
-                .query_map([], |row| row.get(0))
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect();
-            rows
-        };
+        let mut rows = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;",
+                (),
+            )
+            .await
+            .unwrap();
+
+        let mut tables = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let name: String = row.get(0).unwrap();
+            tables.push(name);
+        }
 
         assert!(tables.contains(&"organizations".to_string()));
         assert!(tables.contains(&"users".to_string()));
         assert!(tables.contains(&"organization_memberships".to_string()));
         assert!(tables.contains(&"sessions".to_string()));
+        assert!(tables.contains(&"auth_otps".to_string()));
         assert!(tables.contains(&"accounts".to_string()));
         assert!(tables.contains(&"periods".to_string()));
         assert!(tables.contains(&"entries".to_string()));

@@ -4,8 +4,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum DbError {
-    #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    #[error("Database error: {0}")]
+    Sqlite(#[from] libsql::Error),
 
     #[error("Core validation error: {0}")]
     Core(#[from] sealed_books_core::CoreError),

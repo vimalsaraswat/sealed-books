@@ -11,7 +11,7 @@ use crate::db::repository::organization::Organization;
 use crate::db::repository::period::PeriodRecord;
 use crate::db::repository::session::Session;
 use crate::db::repository::user::User;
-use rusqlite::Connection;
+use libsql::Connection;
 use sealed_books_core::types::{Direction, Entry, Line};
 
 pub const DEMO_ORG_ID: &str = "org_acme";
@@ -24,20 +24,20 @@ pub const DEMO_END_DATE: &str = "2026-08-31";
 /// Seeds demo accounts, period, and entries if not already present.
 ///
 /// Returns `Ok(true)` if seeding took place, or `Ok(false)` if data already existed.
-pub fn seed_if_empty(conn: &mut Connection) -> Result<bool, DbError> {
-    seed_auth_tenancy(conn)?;
+pub async fn seed_if_empty(conn: &Connection) -> Result<bool, DbError> {
+    seed_auth_tenancy(conn).await?;
 
-    if PeriodRecord::find_by_id(conn, DEMO_PERIOD_ID).is_ok() {
+    if PeriodRecord::find_by_id(conn, DEMO_PERIOD_ID).await.is_ok() {
         return Ok(false);
     }
 
-    seed_demo_data(conn)?;
+    seed_demo_data(conn).await?;
     Ok(true)
 }
 
 /// Seeds all chart of accounts, the August 2026 accounting period, and 16 balanced transactions.
 /// Seeds organizations, users, memberships, and test sessions.
-pub fn seed_auth_tenancy(conn: &mut Connection) -> Result<(), DbError> {
+pub async fn seed_auth_tenancy(conn: &Connection) -> Result<(), DbError> {
     let org1 = Organization {
         id: DEMO_ORG_ID.into(),
         name: DEMO_ORG_NAME.into(),
@@ -50,8 +50,8 @@ pub fn seed_auth_tenancy(conn: &mut Connection) -> Result<(), DbError> {
         base_currency: "USD".into(),
         created_at: "2026-08-01T00:00:00Z".into(),
     };
-    let _ = org1.insert(conn);
-    let _ = org2.insert(conn);
+    let _ = org1.insert(conn).await;
+    let _ = org2.insert(conn).await;
 
     let users = vec![
         User {
@@ -88,7 +88,7 @@ pub fn seed_auth_tenancy(conn: &mut Connection) -> Result<(), DbError> {
         },
     ];
     for u in users {
-        let _ = u.insert(conn);
+        let _ = u.insert(conn).await;
     }
 
     let memberships = vec![
@@ -134,7 +134,7 @@ pub fn seed_auth_tenancy(conn: &mut Connection) -> Result<(), DbError> {
         },
     ];
     for m in memberships {
-        let _ = m.insert(conn);
+        let _ = m.insert(conn).await;
     }
 
     let sessions = vec![
@@ -164,15 +164,15 @@ pub fn seed_auth_tenancy(conn: &mut Connection) -> Result<(), DbError> {
         },
     ];
     for s in sessions {
-        let _ = s.insert(conn);
+        let _ = s.insert(conn).await;
     }
 
     Ok(())
 }
 
 /// Seeds all chart of accounts, the August 2026 accounting period, and 16 balanced transactions.
-pub fn seed_demo_data(conn: &mut Connection) -> Result<(), DbError> {
-    seed_auth_tenancy(conn)?;
+pub async fn seed_demo_data(conn: &Connection) -> Result<(), DbError> {
+    seed_auth_tenancy(conn).await?;
 
     // 1. Chart of Accounts
     let accounts = vec![
@@ -271,8 +271,8 @@ pub fn seed_demo_data(conn: &mut Connection) -> Result<(), DbError> {
 
     for account in accounts {
         // Insert account if it doesn't already exist
-        if Account::find_by_id(conn, &account.id).is_err() {
-            account.insert(conn)?;
+        if Account::find_by_id(conn, &account.id).await.is_err() {
+            account.insert(conn).await?;
         }
     }
 
@@ -285,13 +285,13 @@ pub fn seed_demo_data(conn: &mut Connection) -> Result<(), DbError> {
         end_date: DEMO_END_DATE.into(),
         status: "open".into(),
     };
-    period.insert(conn)?;
+    period.insert(conn).await?;
 
     // 3. Balanced Journal Entries
     let entries = get_demo_entries()?;
 
     for entry in entries {
-        entry.post_to(conn, DEMO_PERIOD_ID)?;
+        entry.post_to(conn, DEMO_PERIOD_ID).await?;
     }
 
     Ok(())
@@ -696,33 +696,40 @@ mod tests {
     use sealed_books_core::hash::statement_hash;
     use sealed_books_core::merkle::build_statement;
 
-    fn setup_test_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute("PRAGMA foreign_keys = ON;", []).unwrap();
-        migrate(&conn).unwrap();
+    async fn setup_test_db() -> Connection {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON;", ()).await.unwrap();
+        migrate(&conn).await.unwrap();
         conn
     }
 
-    #[test]
-    fn test_seed_demo_data_succeeds_and_is_idempotent() {
-        let mut conn = setup_test_db();
+    #[tokio::test]
+    async fn test_seed_demo_data_succeeds_and_is_idempotent() {
+        let conn = setup_test_db().await;
 
         // 1. Initial seed should succeed
-        let seeded = seed_if_empty(&mut conn).expect("seed demo data");
+        let seeded = seed_if_empty(&conn).await.expect("seed demo data");
         assert!(seeded, "First seed must report true");
 
         // Verify period exists
-        let period = PeriodRecord::find_by_id(&conn, DEMO_PERIOD_ID).expect("period exists");
+        let period = PeriodRecord::find_by_id(&conn, DEMO_PERIOD_ID)
+            .await
+            .expect("period exists");
         assert_eq!(period.entity, DEMO_ENTITY_NAME);
         assert_eq!(period.status, "open");
 
         // Verify accounts exist
-        let accounts = Account::list_all(&conn).expect("list accounts");
+        let accounts = Account::list_all(&conn).await.expect("list accounts");
         assert_eq!(accounts.len(), 13);
 
         // Verify entries exist and count is 16
-        let entries =
-            <Entry as EntryExt>::find_by_period(&conn, DEMO_PERIOD_ID).expect("get entries");
+        let entries = <Entry as EntryExt>::find_by_period(&conn, DEMO_PERIOD_ID)
+            .await
+            .expect("get entries");
         assert_eq!(entries.len(), 16);
 
         // Verify total debits and credits
@@ -744,27 +751,32 @@ mod tests {
         assert_eq!(total_credits, 12185000);
 
         // 2. Second seed invocation should be a no-op (idempotent)
-        let seeded_again = seed_if_empty(&mut conn).expect("second seed check");
+        let seeded_again = seed_if_empty(&conn).await.expect("second seed check");
         assert!(
             !seeded_again,
             "Second seed must report false (already seeded)"
         );
 
         // Entry count must still be 16
-        let entries_after =
-            <Entry as EntryExt>::find_by_period(&conn, DEMO_PERIOD_ID).expect("get entries");
+        let entries_after = <Entry as EntryExt>::find_by_period(&conn, DEMO_PERIOD_ID)
+            .await
+            .expect("get entries");
         assert_eq!(entries_after.len(), 16);
     }
 
-    #[test]
-    fn test_seeded_data_generates_valid_merkle_root_and_statement() {
-        let mut conn = setup_test_db();
-        seed_if_empty(&mut conn).expect("seed demo data");
+    #[tokio::test]
+    async fn test_seeded_data_generates_valid_merkle_root_and_statement() {
+        let conn = setup_test_db().await;
+        seed_if_empty(&conn).await.expect("seed demo data");
 
-        let period_rec = PeriodRecord::find_by_id(&conn, DEMO_PERIOD_ID).unwrap();
+        let period_rec = PeriodRecord::find_by_id(&conn, DEMO_PERIOD_ID)
+            .await
+            .unwrap();
         let core_period = period_rec.to_core();
 
-        let entries = <Entry as EntryExt>::find_by_period(&conn, DEMO_PERIOD_ID).unwrap();
+        let entries = <Entry as EntryExt>::find_by_period(&conn, DEMO_PERIOD_ID)
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 16);
 
         // Build statement using crates/core
@@ -777,7 +789,7 @@ mod tests {
         assert_eq!(statement.total_debits_minor, 12185000);
         assert_eq!(statement.total_credits_minor, 12185000);
 
-        // Calculate statement prehash (for Privy signing in Phase 3)
+        // Calculate statement prehash
         let hash = statement_hash(&statement);
         assert_ne!(hash, [0u8; 32]);
     }

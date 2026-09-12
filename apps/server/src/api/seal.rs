@@ -98,9 +98,9 @@ async fn get_seal_state(
     State(state): State<AppState>,
     Path(period_id): Path<String>,
 ) -> Result<Json<SealStateResponse>, ApiError> {
-    let conn = state.db.lock();
-    let period = PeriodRecord::find_by_id(&conn, &period_id)?;
-    let seal = SealRecord::find_by_period_id(&conn, &period_id).ok();
+    let conn = state.db.conn();
+    let period = PeriodRecord::find_by_id(conn, &period_id).await?;
+    let seal = SealRecord::find_by_period_id(conn, &period_id).await.ok();
 
     let approvals_collected = match &seal {
         Some(s) => {
@@ -139,15 +139,15 @@ async fn propose_seal(
         ));
     }
 
-    let conn = state.db.lock();
-    let period = PeriodRecord::find_by_id(&conn, &period_id)?;
+    let conn = state.db.conn();
+    let period = PeriodRecord::find_by_id(conn, &period_id).await?;
     if period.status == "sealed" {
         return Err(ApiError::Conflict(
             "Period is already sealed and cannot be reproposed".into(),
         ));
     }
 
-    let entries = Entry::find_by_period(&conn, &period_id)?;
+    let entries = Entry::find_by_period(conn, &period_id).await?;
     let core_period = period.to_core();
     let statement = build_statement(&core_period, &entries)?;
 
@@ -175,7 +175,7 @@ async fn propose_seal(
         created_at: Utc::now().to_rfc3339(),
     };
 
-    seal.upsert(&conn)?;
+    seal.upsert(conn).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -204,8 +204,8 @@ async fn dispatch_seal(
 
     let auditor_id = payload.auditor_id.unwrap_or_else(|| "usr_bob".into());
 
-    let conn = state.db.lock();
-    SealRecord::dispatch_to_auditor(&conn, &period_id, &auditor_id)?;
+    let conn = state.db.conn();
+    SealRecord::dispatch_to_auditor(conn, &period_id, &auditor_id).await?;
 
     Ok(Json(serde_json::json!({
         "status": "dispatched",
@@ -228,8 +228,8 @@ async fn reject_seal(
         ));
     }
 
-    let conn = state.db.lock();
-    SealRecord::reject_audit(&conn, &period_id, &payload.notes)?;
+    let conn = state.db.conn();
+    SealRecord::reject_audit(conn, &period_id, &payload.notes).await?;
 
     Ok(Json(serde_json::json!({
         "status": "rejected",
@@ -247,12 +247,13 @@ async fn approve_seal(
     Json(payload): Json<ApproveRequest>,
 ) -> Result<Json<ApproveResponse>, ApiError> {
     let mut seal = {
-        let conn = state.db.lock();
-        let p = PeriodRecord::find_by_id(&conn, &period_id)?;
+        let conn = state.db.conn();
+        let p = PeriodRecord::find_by_id(conn, &period_id).await?;
         if p.status == "sealed" {
             return Err(ApiError::Conflict("Period is already sealed".into()));
         }
-        SealRecord::find_by_period_id(&conn, &period_id)
+        SealRecord::find_by_period_id(conn, &period_id)
+            .await
             .map_err(|_| ApiError::BadRequest("Seal must be proposed before approving".into()))?
     };
 
@@ -340,8 +341,8 @@ async fn approve_seal(
     }
 
     {
-        let conn = state.db.lock();
-        seal.upsert(&conn)?;
+        let conn = state.db.conn();
+        seal.upsert(conn).await?;
     }
 
     let approvals_collected = match (
@@ -367,16 +368,17 @@ async fn publish_seal(
     Path(period_id): Path<String>,
 ) -> Result<Json<PublishResponse>, ApiError> {
     let (period, mut seal, entries) = {
-        let conn = state.db.lock();
-        let p = PeriodRecord::find_by_id(&conn, &period_id)?;
+        let conn = state.db.conn();
+        let p = PeriodRecord::find_by_id(conn, &period_id).await?;
         if p.status == "sealed" {
             return Err(ApiError::Conflict(
                 "Period is already sealed on Hedera HCS".into(),
             ));
         }
-        let s = SealRecord::find_by_period_id(&conn, &period_id)
+        let s = SealRecord::find_by_period_id(conn, &period_id)
+            .await
             .map_err(|_| ApiError::BadRequest("No proposed seal found for period".into()))?;
-        let e = Entry::find_by_period(&conn, &period_id)?;
+        let e = Entry::find_by_period(conn, &period_id).await?;
         (p, s, e)
     };
 
@@ -438,7 +440,7 @@ async fn publish_seal(
 
     // Persist baseline leaf hashes and mark period immutable
     {
-        let conn = state.db.lock();
+        let conn = state.db.conn();
         let leaves: Vec<(String, [u8; 32])> = entries
             .iter()
             .map(|e| {
@@ -447,19 +449,22 @@ async fn publish_seal(
             })
             .collect();
 
-        SealRecord::save_leaves(&conn, &period_id, &leaves)?;
+        SealRecord::save_leaves(conn, &period_id, &leaves).await?;
 
         seal.topic_id = Some(receipt.topic_id.clone());
         seal.sequence_number = Some(receipt.sequence_number as i64);
         seal.consensus_timestamp = Some(receipt.consensus_timestamp.clone());
         seal.dispatch_status = "sealed".into();
-        seal.upsert(&conn)?;
+        seal.upsert(conn).await?;
 
-        PeriodRecord::mark_sealed(&conn, &period_id)?;
+        PeriodRecord::mark_sealed(conn, &period_id).await?;
     }
 
     let hashscan_url = if !receipt.consensus_timestamp.is_empty() {
-        format!("https://hashscan.io/testnet/transaction/{}", receipt.consensus_timestamp)
+        format!(
+            "https://hashscan.io/testnet/transaction/{}",
+            receipt.consensus_timestamp
+        )
     } else {
         format!("https://hashscan.io/testnet/topic/{}", receipt.topic_id)
     };

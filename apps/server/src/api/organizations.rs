@@ -78,8 +78,8 @@ async fn list_organizations(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Vec<crate::api::auth::UserOrgSummary>>, ApiError> {
-    let conn = state.db.lock();
-    let orgs = Organization::list_for_user(&conn, &auth.user.id)?;
+    let conn = state.db.conn();
+    let orgs = Organization::list_for_user(conn, &auth.user.id).await?;
     let summaries = orgs
         .into_iter()
         .map(|(o, role)| crate::api::auth::UserOrgSummary {
@@ -125,11 +125,9 @@ async fn create_organization(
         created_at: Utc::now().to_rfc3339(),
     };
 
-    {
-        let conn = state.db.lock();
-        org.insert(&conn)?;
-        membership.insert(&conn)?;
-    }
+    let conn = state.db.conn();
+    org.insert(conn).await?;
+    membership.insert(conn).await?;
 
     Ok((StatusCode::CREATED, Json(org)))
 }
@@ -140,11 +138,11 @@ async fn list_organization_members(
     auth: AuthContext,
     Path(org_id): Path<String>,
 ) -> Result<Json<Vec<OrgMemberResponse>>, ApiError> {
-    let conn = state.db.lock();
+    let conn = state.db.conn();
     // Verify caller is a member of this org
-    Membership::find(&conn, &org_id, &auth.user.id)?;
+    Membership::find(conn, &org_id, &auth.user.id).await?;
 
-    let members = Membership::list_by_org(&conn, &org_id)?;
+    let members = Membership::list_by_org(conn, &org_id).await?;
     let mut responses = Vec::new();
 
     for (m, u) in members {
@@ -190,10 +188,10 @@ async fn invite_member(
         return Err(ApiError::BadRequest("Email cannot be empty".into()));
     }
 
-    let conn = state.db.lock();
+    let conn = state.db.conn();
 
     // Check if user exists or register them
-    let user = match User::find_by_email(&conn, &email) {
+    let user = match User::find_by_email(conn, &email).await {
         Ok(u) => u,
         Err(_) => {
             let uid = format!("usr_{}", &Uuid::new_v4().simple().to_string()[..8]);
@@ -210,13 +208,13 @@ async fn invite_member(
                 eth_address,
                 created_at: Utc::now().to_rfc3339(),
             };
-            new_user.insert(&conn)?;
+            new_user.insert(conn).await?;
             new_user
         }
     };
 
     // Check if membership already exists
-    if let Ok(existing) = Membership::find(&conn, &org_id, &user.id) {
+    if let Ok(existing) = Membership::find(conn, &org_id, &user.id).await {
         return Err(ApiError::Conflict(format!(
             "User {} is already a member with role '{}'",
             email, existing.role
@@ -232,7 +230,7 @@ async fn invite_member(
         created_at: Utc::now().to_rfc3339(),
     };
 
-    membership.insert(&conn)?;
+    membership.insert(conn).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -255,8 +253,8 @@ async fn list_pending_audits(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Vec<PendingAuditItem>>, ApiError> {
-    let conn = state.db.lock();
-    let rows = SealRecord::list_pending_audits(&conn, Some(&auth.user.id))?;
+    let conn = state.db.conn();
+    let rows = SealRecord::list_pending_audits(conn, Some(&auth.user.id)).await?;
 
     let items = rows
         .into_iter()

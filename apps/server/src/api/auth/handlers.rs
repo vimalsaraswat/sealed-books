@@ -3,8 +3,8 @@
 use super::otp::{generate_otp_code, store_otp, verify_and_consume_otp};
 use super::service::{build_login_response_for_user, provision_user_and_workspace};
 use super::types::{
-    AuthContext, LoginRequest, LoginResponse, RegisterRequest, SendOtpRequest,
-    SendOtpResponse, SwitchOrgRequest, UserOrgSummary, VerifyOtpRequest,
+    AuthContext, LoginRequest, LoginResponse, RegisterRequest, SendOtpRequest, SendOtpResponse,
+    SwitchOrgRequest, UserOrgSummary, VerifyOtpRequest,
 };
 use crate::api::AppState;
 use crate::api::error::ApiError;
@@ -21,8 +21,9 @@ pub async fn get_me(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    let conn = state.db.lock();
-    let orgs = Organization::list_for_user(&conn, &auth.user.id)
+    let conn = state.db.conn();
+    let orgs = Organization::list_for_user(conn, &auth.user.id)
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let summaries = orgs
@@ -49,18 +50,22 @@ pub async fn post_login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    let conn = state.db.lock();
+    let conn = state.db.conn();
 
     let target_user = if let Some(ref email) = payload.email {
-        User::find_by_email(&conn, email.trim().to_lowercase().as_str())
+        User::find_by_email(conn, email.trim().to_lowercase().as_str())
+            .await
             .map_err(|_| ApiError::Unauthorized("Invalid email address".into()))?
     } else if let Some(ref uid) = payload.user_id {
-        User::find_by_id(&conn, uid)
+        User::find_by_id(conn, uid)
+            .await
             .map_err(|_| ApiError::Unauthorized("Invalid user id".into()))?
     } else if let Some(ref token) = payload.token {
-        let session = Session::find_by_token(&conn, token)
+        let session = Session::find_by_token(conn, token)
+            .await
             .map_err(|_| ApiError::Unauthorized("Invalid session token".into()))?;
-        User::find_by_id(&conn, &session.user_id)
+        User::find_by_id(conn, &session.user_id)
+            .await
             .map_err(|_| ApiError::Unauthorized("User not found for session".into()))?
     } else {
         return Err(ApiError::BadRequest(
@@ -68,7 +73,7 @@ pub async fn post_login(
         ));
     };
 
-    let resp = build_login_response_for_user(&conn, &target_user)?;
+    let resp = build_login_response_for_user(conn, &target_user).await?;
     Ok(Json(resp))
 }
 
@@ -85,19 +90,20 @@ pub async fn post_register(
         return Err(ApiError::BadRequest("Name cannot be empty".into()));
     }
 
-    let conn = state.db.lock();
-    if User::find_by_email(&conn, &email).is_ok() {
+    let conn = state.db.conn();
+    if User::find_by_email(conn, &email).await.is_ok() {
         return Err(ApiError::Conflict(
             "A user with this email address already exists. Please log in.".into(),
         ));
     }
 
     let resp = provision_user_and_workspace(
-        &conn,
+        conn,
         &email,
         Some(&payload.name),
         payload.organization_name.as_deref(),
-    )?;
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -107,8 +113,8 @@ pub async fn post_logout(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<StatusCode, ApiError> {
-    let conn = state.db.lock();
-    Session::delete(&conn, &auth.token).ok();
+    let conn = state.db.conn();
+    let _ = Session::delete(conn, &auth.token).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -118,41 +124,44 @@ pub async fn post_switch_org(
     auth: AuthContext,
     Json(payload): Json<SwitchOrgRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    let (new_org, new_role, summaries) = {
-        let conn = state.db.lock();
-        Membership::find(&conn, &payload.organization_id, &auth.user.id).map_err(|_| {
+    let conn = state.db.conn();
+    Membership::find(conn, &payload.organization_id, &auth.user.id)
+        .await
+        .map_err(|_| {
             ApiError::Forbidden(format!(
                 "You are not a member of organization {}",
                 payload.organization_id
             ))
         })?;
 
-        Session::update_active_org(&conn, &auth.token, &payload.organization_id)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Session::update_active_org(conn, &auth.token, &payload.organization_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        let o = Organization::find_by_id(&conn, &payload.organization_id)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let m = Membership::find(&conn, &payload.organization_id, &auth.user.id)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let list = Organization::list_for_user(&conn, &auth.user.id)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let summaries = list
-            .into_iter()
-            .map(|(org, r)| UserOrgSummary {
-                id: org.id,
-                name: org.name,
-                base_currency: org.base_currency,
-                role: r,
-            })
-            .collect();
-        (o, m.role, summaries)
-    };
+    let o = Organization::find_by_id(conn, &payload.organization_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let m = Membership::find(conn, &payload.organization_id, &auth.user.id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let list = Organization::list_for_user(conn, &auth.user.id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let summaries = list
+        .into_iter()
+        .map(|(org, r)| UserOrgSummary {
+            id: org.id,
+            name: org.name,
+            base_currency: org.base_currency,
+            role: r,
+        })
+        .collect();
 
     Ok(Json(LoginResponse {
         token: auth.token,
         user: auth.user,
-        active_organization: new_org,
-        role: new_role,
+        active_organization: o,
+        role: m.role,
         available_organizations: summaries,
     }))
 }
@@ -169,17 +178,12 @@ pub async fn post_send_otp(
         ));
     }
 
-    let is_new_user = {
-        let conn = state.db.lock();
-        User::find_by_email(&conn, &email).is_err()
-    };
+    let conn = state.db.conn();
+    let is_new_user = User::find_by_email(conn, &email).await.is_err();
 
     let code = generate_otp_code();
 
-    {
-        let conn = state.db.lock();
-        store_otp(&conn, &email, &code)?;
-    }
+    store_otp(conn, &email, &code).await?;
 
     // Dispatch real email via EmailService (Resend in production, logs/dev in local)
     let _ = state.email.send_otp(&email, &code).await;
@@ -205,31 +209,29 @@ pub async fn post_verify_otp(
         ));
     }
 
-    {
-        let conn = state.db.lock();
-        let is_valid = verify_and_consume_otp(&conn, &email, &submitted_code)?;
-        if !is_valid {
-            return Err(ApiError::Unauthorized(
-                "Invalid or expired verification code".into(),
-            ));
-        }
+    let conn = state.db.conn();
+    let is_valid = verify_and_consume_otp(conn, &email, &submitted_code).await?;
+    if !is_valid {
+        return Err(ApiError::Unauthorized(
+            "Invalid or expired verification code".into(),
+        ));
     }
 
-    let conn = state.db.lock();
-    let existing_user = User::find_by_email(&conn, &email).ok();
+    let existing_user = User::find_by_email(conn, &email).await.ok();
 
     if let Some(user) = existing_user {
-        let resp = build_login_response_for_user(&conn, &user)?;
+        let resp = build_login_response_for_user(conn, &user).await?;
         return Ok((StatusCode::OK, Json(resp)));
     }
 
     // Brand new user: Automatic registration with default organization
     let resp = provision_user_and_workspace(
-        &conn,
+        conn,
         &email,
         payload.name.as_deref(),
         payload.organization_name.as_deref(),
-    )?;
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(resp)))
 }

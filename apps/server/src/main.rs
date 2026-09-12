@@ -13,15 +13,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Sealed Books Server initializing...");
 
-    // Initialize Database
-    let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "sealed_books.db".to_string());
-    let db = Database::open(&db_path)?;
-    tracing::info!("Database initialized at {}", db_path);
+    // Initialize Database from env (DATABASE_URL, TURSO_DATABASE_URL, or DATABASE_PATH)
+    let db_target = Database::resolve_target_from_env();
+    let db = Database::open(&db_target).await?;
+    tracing::info!("Database successfully initialized at: {}", db_target);
 
     // Auto-seed demo dataset if empty
     {
-        let mut conn = db.lock();
-        if seed_if_empty(&mut conn)? {
+        let conn = db.conn();
+        if seed_if_empty(conn).await? {
             tracing::info!("Demo dataset (Acme Trading Pvt Ltd, August 2026) seeded.");
         } else {
             tracing::info!("Existing ledger data detected; skipped demo seeding.");
