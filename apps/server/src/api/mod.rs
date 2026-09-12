@@ -645,4 +645,173 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
+
+    #[tokio::test]
+    async fn test_verify_unsealed_period_rejected_with_400() {
+        let (app, _) = setup_test_app();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/periods/per_2026_08/verify")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_verify_sealed_period_intact_and_tampered_scenarios() {
+        let (app, db) = setup_test_app();
+
+        // 1. Propose seal
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/propose")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let propose_json: Value = serde_json::from_slice(&body).unwrap();
+        let st_hash_hex = propose_json["statement_hash"].as_str().unwrap();
+        let st_hash_bytes = hex::decode(st_hash_hex.trim_start_matches("0x")).unwrap();
+
+        // 2. Approver 1 signs
+        let key1 = SigningKey::random(&mut OsRng);
+        let vk1 = key1.verifying_key();
+        let pk1_hex = format!("0x{}", hex::encode(vk1.to_encoded_point(true).as_bytes()));
+        let (sig1, _) = key1.sign_prehash_recoverable(&st_hash_bytes).unwrap();
+        let sig1_hex = format!("0x{}", hex::encode(sig1.to_bytes()));
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "approver_pubkey": pk1_hex,
+                            "signature": sig1_hex,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // 3. Approver 2 signs
+        let key2 = SigningKey::random(&mut OsRng);
+        let vk2 = key2.verifying_key();
+        let pk2_hex = format!("0x{}", hex::encode(vk2.to_encoded_point(true).as_bytes()));
+        let (sig2, _) = key2.sign_prehash_recoverable(&st_hash_bytes).unwrap();
+        let sig2_hex = format!("0x{}", hex::encode(sig2.to_bytes()));
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "approver_pubkey": pk2_hex,
+                            "signature": sig2_hex,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // 4. Publish to Hedera
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/publish")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 5. Run Verification: INTACT (Green)
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/periods/per_2026_08/verify")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let verify_json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(verify_json["status"], "verified");
+        assert_eq!(verify_json["is_intact"], true);
+        assert!(verify_json["discrepancy"].is_null());
+        assert_eq!(verify_json["approver_1"]["signature_valid"], true);
+        assert_eq!(verify_json["approver_2"]["signature_valid"], true);
+        assert_eq!(
+            verify_json["database_summary"]["ledger_root"],
+            verify_json["on_chain_statement"]["ledger_root"]
+        );
+
+        // 6. Direct quiet modification in SQLite (Tamper)
+        {
+            let conn = db.lock();
+            conn.execute(
+                "UPDATE entries SET description = 'Modified invoice details' WHERE id = 'ent_2026_08_05';",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 7. Run Verification again: TAMPERED (Red) - Points directly to ent_2026_08_05!
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/periods/per_2026_08/verify")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let verify_json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(verify_json["status"], "tampered");
+        assert_eq!(verify_json["is_intact"], false);
+        assert!(verify_json["discrepancy"].is_object());
+        assert_eq!(
+            verify_json["discrepancy"]["offending_entry_id"],
+            "ent_2026_08_05"
+        );
+        assert!(
+            verify_json["discrepancy"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ent_2026_08_05")
+        );
+    }
 }
