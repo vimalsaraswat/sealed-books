@@ -8,6 +8,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::api::auth::AuthContext;
 use crate::api::error::ApiError;
 use crate::db::repository::entry::EntryExt;
 use sealed_books_core::types::{Direction, Entry, Line};
@@ -50,9 +51,16 @@ pub async fn list_entries(
 /// Posts a balanced journal entry to an open accounting period.
 pub async fn post_entry(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(period_id): Path<String>,
     Json(payload): Json<CreateEntryRequest>,
 ) -> Result<(StatusCode, Json<Entry>), ApiError> {
+    if auth.role == "auditor" {
+        return Err(ApiError::Forbidden(
+            "External Auditors have read-only audit access and cannot create or modify journal entries".into(),
+        ));
+    }
+
     // Generate IDs and timestamps if omitted
     let entry_id = payload
         .id
@@ -86,10 +94,9 @@ pub async fn post_entry(
         lines,
     };
 
-    // Atomic insert with full double-entry invariant verification
     {
-        let mut conn = state.db.lock();
-        entry.post_to(&mut conn, &period_id)?;
+        let conn = state.db.lock();
+        entry.post_to(&conn, &period_id)?;
     }
 
     Ok((StatusCode::CREATED, Json(entry)))

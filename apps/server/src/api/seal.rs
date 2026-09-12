@@ -8,6 +8,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
+use crate::api::auth::AuthContext;
 use crate::api::error::ApiError;
 use crate::crypto;
 use crate::db::repository::entry::EntryExt;
@@ -26,6 +27,18 @@ pub struct ApproveRequest {
     pub signature: Option<String>,
     /// Privy server wallet ID to sign via attached Privy policy.
     pub wallet_id: Option<String>,
+}
+
+/// Request payload for dispatching a proposed seal to an external auditor.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DispatchSealRequest {
+    pub auditor_id: Option<String>,
+}
+
+/// Request payload for an auditor rejecting a seal proposal with notes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RejectSealRequest {
+    pub notes: String,
 }
 
 /// Response returned when a seal is proposed.
@@ -73,6 +86,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(get_seal_state))
         .route("/propose", post(propose_seal))
+        .route("/dispatch", post(dispatch_seal))
+        .route("/reject", post(reject_seal))
         .route("/approve", post(approve_seal))
         .route("/publish", post(publish_seal))
         .route("/verify", get(verify_seal))
@@ -115,8 +130,15 @@ async fn get_seal_state(
 /// Proposes a seal for an open period: builds the canonical statement and hash.
 async fn propose_seal(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(period_id): Path<String>,
 ) -> Result<(StatusCode, Json<ProposeResponse>), ApiError> {
+    if auth.role == "auditor" || auth.role == "staff" {
+        return Err(ApiError::Forbidden(
+            "Only Organization Owners, Admins, or Controllers can propose a period close".into(),
+        ));
+    }
+
     let conn = state.db.lock();
     let period = PeriodRecord::find_by_id(&conn, &period_id)?;
     if period.status == "sealed" {
@@ -147,6 +169,9 @@ async fn propose_seal(
         approver_1_sig: None,
         approver_2_pubkey: None,
         approver_2_sig: None,
+        dispatch_status: "draft".into(),
+        auditor_id: None,
+        auditor_notes: None,
         created_at: Utc::now().to_rfc3339(),
     };
 
@@ -163,9 +188,61 @@ async fn propose_seal(
     ))
 }
 
+/// Dispatches a proposed seal to an auditor for review.
+async fn dispatch_seal(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(period_id): Path<String>,
+    Json(payload): Json<DispatchSealRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if auth.role == "auditor" || auth.role == "staff" {
+        return Err(ApiError::Forbidden(
+            "Only Organization Owners, Admins, or Controllers can dispatch a seal to auditors"
+                .into(),
+        ));
+    }
+
+    let auditor_id = payload.auditor_id.unwrap_or_else(|| "usr_bob".into());
+
+    let conn = state.db.lock();
+    SealRecord::dispatch_to_auditor(&conn, &period_id, &auditor_id)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "dispatched",
+        "period_id": period_id,
+        "auditor_id": auditor_id,
+        "dispatch_status": "pending_auditor"
+    })))
+}
+
+/// Rejects an audit proposal and returns notes to the controller.
+async fn reject_seal(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(period_id): Path<String>,
+    Json(payload): Json<RejectSealRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if auth.role != "auditor" && auth.role != "owner" && auth.role != "admin" {
+        return Err(ApiError::Forbidden(
+            "Only the assigned Auditor or Admin can reject a proposed close".into(),
+        ));
+    }
+
+    let conn = state.db.lock();
+    SealRecord::reject_audit(&conn, &period_id, &payload.notes)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "rejected",
+        "period_id": period_id,
+        "notes": payload.notes,
+        "dispatch_status": "rejected"
+    })))
+}
+
 /// Records one approver's cryptographic signature against the proposed seal.
 async fn approve_seal(
     State(state): State<AppState>,
+    _auth: AuthContext,
     Path(period_id): Path<String>,
     Json(payload): Json<ApproveRequest>,
 ) -> Result<Json<ApproveResponse>, ApiError> {
@@ -229,20 +306,25 @@ async fn approve_seal(
         },
     };
 
-    if let Some(existing_p1) = &seal.approver_1_pubkey {
-        if existing_p1.eq_ignore_ascii_case(&approver_pubkey_hex) {
-            return Err(ApiError::Conflict(
-                "This approver has already signed the proposed seal".into(),
-            ));
-        }
+    // Four-Eyes Principle / Separation of Duties (Anti-Self-Approval)
+    if seal
+        .approver_1_pubkey
+        .as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case(&approver_pubkey_hex))
+    {
+        return Err(ApiError::Conflict(
+            "Separation of Duties violation: The same approver cannot sign both Approver 1 and Approver 2".into(),
+        ));
     }
 
-    if let Some(existing_p2) = &seal.approver_2_pubkey {
-        if existing_p2.eq_ignore_ascii_case(&approver_pubkey_hex) {
-            return Err(ApiError::Conflict(
-                "This approver has already signed the proposed seal".into(),
-            ));
-        }
+    if seal
+        .approver_2_pubkey
+        .as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case(&approver_pubkey_hex))
+    {
+        return Err(ApiError::Conflict(
+            "This approver has already signed the proposed seal".into(),
+        ));
     }
 
     if seal.approver_1_pubkey.is_none() {
@@ -279,127 +361,120 @@ async fn approve_seal(
     }))
 }
 
-/// Publishes the sealed period to Hedera Consensus Service once 2-of-n approvals are collected.
+/// Publishes the dual-signed seal statement to Hedera Consensus Service.
 async fn publish_seal(
     State(state): State<AppState>,
     Path(period_id): Path<String>,
 ) -> Result<Json<PublishResponse>, ApiError> {
-    let (mut seal, period) = {
+    let (period, mut seal, entries) = {
         let conn = state.db.lock();
         let p = PeriodRecord::find_by_id(&conn, &period_id)?;
         if p.status == "sealed" {
             return Err(ApiError::Conflict(
-                "Period is already sealed and published".into(),
+                "Period is already sealed on Hedera HCS".into(),
             ));
         }
         let s = SealRecord::find_by_period_id(&conn, &period_id)
-            .map_err(|_| ApiError::BadRequest("Seal has not been proposed".into()))?;
-        (s, p)
+            .map_err(|_| ApiError::BadRequest("No proposed seal found for period".into()))?;
+        let e = Entry::find_by_period(&conn, &period_id)?;
+        (p, s, e)
     };
 
-    let p1_hex = seal
+    let p1_key = seal
         .approver_1_pubkey
-        .as_deref()
-        .ok_or_else(|| ApiError::Unprocessable("Approver 1 is missing".into()))?;
-    let s1_hex = seal
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("Missing approver 1 signature".into()))?;
+    let p1_sig = seal
         .approver_1_sig
-        .as_deref()
-        .ok_or_else(|| ApiError::Unprocessable("Approver 1 signature is missing".into()))?;
-    let p2_hex = seal
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("Missing approver 1 signature".into()))?;
+    let p2_key = seal
         .approver_2_pubkey
-        .as_deref()
-        .ok_or_else(|| ApiError::Unprocessable("Approver 2 is missing".into()))?;
-    let s2_hex = seal
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("Missing approver 2 signature".into()))?;
+    let p2_sig = seal
         .approver_2_sig
-        .as_deref()
-        .ok_or_else(|| ApiError::Unprocessable("Approver 2 signature is missing".into()))?;
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("Missing approver 2 signature".into()))?;
 
-    if p1_hex.eq_ignore_ascii_case(p2_hex) {
-        return Err(ApiError::Unprocessable(
-            "Approver 1 and Approver 2 must be distinct cryptographic identities".into(),
-        ));
-    }
+    let p1_key_bytes: [u8; 33] = hex::decode(p1_key.trim_start_matches("0x"))
+        .map_err(|_| ApiError::Internal("Invalid hex in approver_1_pubkey".into()))?
+        .try_into()
+        .map_err(|_| ApiError::Internal("Invalid length for approver_1_pubkey".into()))?;
 
-    let p1_bytes = hex::decode(p1_hex.trim_start_matches("0x"))
-        .map_err(|e| ApiError::Internal(format!("Invalid stored pubkey 1: {e}")))?;
-    let s1_bytes = hex::decode(s1_hex.trim_start_matches("0x"))
-        .map_err(|e| ApiError::Internal(format!("Invalid stored sig 1: {e}")))?;
-    let p2_bytes = hex::decode(p2_hex.trim_start_matches("0x"))
-        .map_err(|e| ApiError::Internal(format!("Invalid stored pubkey 2: {e}")))?;
-    let s2_bytes = hex::decode(s2_hex.trim_start_matches("0x"))
-        .map_err(|e| ApiError::Internal(format!("Invalid stored sig 2: {e}")))?;
+    let p1_sig_bytes: [u8; 64] = hex::decode(p1_sig.trim_start_matches("0x"))
+        .map_err(|_| ApiError::Internal("Invalid hex in approver_1_sig".into()))?
+        .try_into()
+        .map_err(|_| ApiError::Internal("Invalid length for approver_1_sig".into()))?;
 
-    let mut approver_1_pubkey = [0u8; 33];
-    let mut approver_1_sig = [0u8; 64];
-    let mut approver_2_pubkey = [0u8; 33];
-    let mut approver_2_sig = [0u8; 64];
+    let p2_key_bytes: [u8; 33] = hex::decode(p2_key.trim_start_matches("0x"))
+        .map_err(|_| ApiError::Internal("Invalid hex in approver_2_pubkey".into()))?
+        .try_into()
+        .map_err(|_| ApiError::Internal("Invalid length for approver_2_pubkey".into()))?;
 
-    approver_1_pubkey.copy_from_slice(&p1_bytes);
-    approver_1_sig.copy_from_slice(&s1_bytes[..64]);
-    approver_2_pubkey.copy_from_slice(&p2_bytes);
-    approver_2_sig.copy_from_slice(&s2_bytes[..64]);
+    let p2_sig_bytes: [u8; 64] = hex::decode(p2_sig.trim_start_matches("0x"))
+        .map_err(|_| ApiError::Internal("Invalid hex in approver_2_sig".into()))?
+        .try_into()
+        .map_err(|_| ApiError::Internal("Invalid length for approver_2_sig".into()))?;
 
-    let (current_statement, leaf_hashes) = {
-        let conn = state.db.lock();
-        let entries = Entry::find_by_period(&conn, &period_id)?;
-        let core_period = period.to_core();
-        let mut leaves = Vec::with_capacity(entries.len());
-        for e in &entries {
-            let h = sealed_books_core::hash_entry(e)?;
-            leaves.push((e.id.clone(), h));
-        }
-        let st = build_statement(&core_period, &entries)?;
-        (st, leaves)
-    };
-
-    let current_hash_hex = format!("0x{}", hex::encode(statement_hash(&current_statement)));
-    if !current_hash_hex.eq_ignore_ascii_case(&seal.statement_hash) {
-        return Err(ApiError::Conflict(
-            "Ledger entries were modified after seal approval; proposal is invalid".into(),
-        ));
-    }
+    let core_period = period.to_core();
+    let statement = build_statement(&core_period, &entries)?;
 
     let payload = SealPayload {
-        statement: current_statement,
-        approver_1_pubkey,
-        approver_1_sig,
-        approver_2_pubkey,
-        approver_2_sig,
+        statement,
+        approver_1_pubkey: p1_key_bytes,
+        approver_1_sig: p1_sig_bytes,
+        approver_2_pubkey: p2_key_bytes,
+        approver_2_sig: p2_sig_bytes,
     };
 
-    let payload_bytes = encode_seal_payload(&payload);
+    let encoded_bytes = encode_seal_payload(&payload);
 
     let receipt = state
         .publisher
-        .publish(&state.topic_id, &payload_bytes)
+        .publish(&state.topic_id, &encoded_bytes)
         .await
-        .map_err(|e| ApiError::Internal(format!("Hedera HCS submission failed: {e}")))?;
+        .map_err(|e| ApiError::Internal(format!("Hedera consensus broadcast failed: {e}")))?;
 
+    // Persist baseline leaf hashes and mark period immutable
     {
         let conn = state.db.lock();
+        let leaves: Vec<(String, [u8; 32])> = entries
+            .iter()
+            .map(|e| {
+                let h = sealed_books_core::hash_entry_unchecked(e);
+                (e.id.clone(), h)
+            })
+            .collect();
+
+        SealRecord::save_leaves(&conn, &period_id, &leaves)?;
+
         seal.topic_id = Some(receipt.topic_id.clone());
         seal.sequence_number = Some(receipt.sequence_number as i64);
         seal.consensus_timestamp = Some(receipt.consensus_timestamp.clone());
+        seal.dispatch_status = "sealed".into();
         seal.upsert(&conn)?;
 
-        SealRecord::save_leaves(&conn, &period_id, &leaf_hashes)?;
         PeriodRecord::mark_sealed(&conn, &period_id)?;
     }
 
-    let hashscan_url = format!("https://hashscan.io/testnet/topic/{}", receipt.topic_id);
+    let hashscan_url = format!(
+        "https://hashscan.io/testnet/topic/{}/message/{}",
+        receipt.topic_id, receipt.sequence_number
+    );
 
     Ok(Json(PublishResponse {
-        status: "sealed".to_string(),
+        status: "published".into(),
         topic_id: receipt.topic_id,
         sequence_number: receipt.sequence_number,
         consensus_timestamp: receipt.consensus_timestamp,
         transaction_id: receipt.transaction_id,
         hashscan_url,
-        payload_bytes_len: payload_bytes.len(),
+        payload_bytes_len: encoded_bytes.len(),
     }))
 }
 
-/// Runs independent verification for the accounting period.
+/// Runs independent verification for an accounting period against Hedera mirror node.
 async fn verify_seal(
     State(state): State<AppState>,
     Path(period_id): Path<String>,

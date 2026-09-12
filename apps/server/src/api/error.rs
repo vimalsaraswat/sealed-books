@@ -1,55 +1,47 @@
-//! HTTP API error types and JSON response mapping.
+//! HTTP API error handling and Axum response conversion.
 
+use crate::db::error::DbError;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde_json::json;
-use thiserror::Error;
-
-use crate::db::DbError;
 use sealed_books_core::CoreError;
+use serde_json::json;
 
-/// High-level API errors representing HTTP semantics.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ApiError {
-    #[error("Not found: {0}")]
-    NotFound(String),
-
-    #[error("Conflict: {0}")]
-    Conflict(String),
-
-    #[error("Unprocessable entity: {0}")]
-    Unprocessable(String),
-
-    #[error("Bad request: {0}")]
     BadRequest(String),
-
-    #[error("Internal server error: {0}")]
+    NotFound(String),
+    Conflict(String),
+    Unauthorized(String),
+    Forbidden(String),
     Internal(String),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            ApiError::Unprocessable(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+        let (status, message) = match self {
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
+            ApiError::Internal(msg) => {
+                tracing::error!("Internal error: {}", msg);
+                (StatusCode::INTERNAL_SERVER_ERROR, msg)
+            }
         };
 
-        let body = Json(json!({ "error": message }));
+        let body = Json(json!({
+            "error": message
+        }));
+
         (status, body).into_response()
     }
 }
 
 impl From<CoreError> for ApiError {
     fn from(err: CoreError) -> Self {
-        match err {
-            CoreError::SerializationError(msg) => ApiError::BadRequest(msg),
-            // Accounting domain invariant violations (unbalanced entries, out-of-range, etc.)
-            _ => ApiError::Unprocessable(err.to_string()),
-        }
+        ApiError::BadRequest(err.to_string())
     }
 }
 
@@ -68,6 +60,7 @@ impl From<DbError> for ApiError {
             DbError::SealAlreadyExists(id) => {
                 ApiError::Conflict(format!("Seal for period '{id}' already exists"))
             }
+            DbError::EntityNotFound(msg) => ApiError::NotFound(msg),
             DbError::Core(core_err) => core_err.into(),
             DbError::Sqlite(e) => {
                 tracing::error!("Database SQLite error: {:?}", e);
