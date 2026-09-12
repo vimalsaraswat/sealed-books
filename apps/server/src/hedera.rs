@@ -25,14 +25,18 @@ pub struct HederaLivePublisher {
 
 impl HederaLivePublisher {
     pub fn new_from_env() -> Result<Self, String> {
-        let account_id_str = std::env::var("HEDERA_OPERATOR_ID")
-            .map_err(|_| "HEDERA_OPERATOR_ID not set in environment".to_string())?;
+        let account_id_str = std::env::var("HEDERA_OPERATOR_ACCOUNT_ID")
+            .or_else(|_| std::env::var("HEDERA_OPERATOR_ID"))
+            .map_err(|_| {
+                "HEDERA_OPERATOR_ACCOUNT_ID or HEDERA_OPERATOR_ID not set in environment"
+                    .to_string()
+            })?;
         let private_key_str = std::env::var("HEDERA_OPERATOR_KEY")
             .map_err(|_| "HEDERA_OPERATOR_KEY not set in environment".to_string())?;
 
         let client = Client::for_testnet();
         let operator_id = hedera::AccountId::from_str(&account_id_str)
-            .map_err(|e| format!("Invalid HEDERA_OPERATOR_ID: {e}"))?;
+            .map_err(|e| format!("Invalid Hedera operator account ID {account_id_str}: {e}"))?;
         let operator_key = PrivateKey::from_str(&private_key_str)
             .map_err(|e| format!("Invalid HEDERA_OPERATOR_KEY: {e}"))?;
 
@@ -54,12 +58,12 @@ impl HederaLivePublisher {
         let response = TopicMessageSubmitTransaction::new()
             .topic_id(topic_id)
             .message(message.to_vec())
-            .execute(&*self.client)
+            .execute(&self.client)
             .await
             .map_err(|e| format!("Hedera HCS submit transaction failed: {e}"))?;
 
         let receipt = response
-            .get_receipt(&*self.client)
+            .get_receipt(&self.client)
             .await
             .map_err(|e| format!("Hedera transaction receipt failed: {e}"))?;
 
@@ -80,6 +84,12 @@ impl HederaLivePublisher {
 pub struct MockPublisher {
     next_seq: Arc<AtomicU64>,
     store: Option<MockMessageStore>,
+}
+
+impl Default for MockPublisher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockPublisher {
@@ -124,16 +134,16 @@ pub enum PublisherClient {
 }
 
 impl PublisherClient {
+    pub fn live_from_env() -> Result<Self, String> {
+        HederaLivePublisher::new_from_env().map(Self::Live)
+    }
+
     pub fn mock() -> Self {
-        PublisherClient::Mock(MockPublisher::new())
+        Self::Mock(MockPublisher::new())
     }
 
     pub fn mock_with_store(store: MockMessageStore) -> Self {
-        PublisherClient::Mock(MockPublisher::with_store(store))
-    }
-
-    pub fn live_from_env() -> Result<Self, String> {
-        Ok(PublisherClient::Live(HederaLivePublisher::new_from_env()?))
+        Self::Mock(MockPublisher::with_store(store))
     }
 
     pub async fn publish(&self, topic_id: &str, message: &[u8]) -> Result<PublishReceipt, String> {

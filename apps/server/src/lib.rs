@@ -3,6 +3,7 @@
 pub mod api;
 pub mod crypto;
 pub mod db;
+pub mod email;
 pub mod hedera;
 pub mod mirror;
 pub mod privy;
@@ -11,6 +12,7 @@ pub mod verify;
 
 pub use api::{AppState, create_router};
 pub use db::*;
+pub use email::EmailService;
 pub use hedera::{HederaLivePublisher, MockPublisher, PublishReceipt, PublisherClient};
 pub use mirror::{DEFAULT_TESTNET_MIRROR_URL, MirrorClient, MockMessageStore};
 pub use privy::PrivyClient;

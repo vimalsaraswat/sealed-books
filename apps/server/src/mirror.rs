@@ -21,10 +21,12 @@ pub struct MirrorTopicMessage {
     pub running_hash: Option<String>,
 }
 
+pub type MessageStoreMap = Arc<Mutex<HashMap<(String, u64), (String, Vec<u8>)>>>;
+
 /// Shared in-memory message store for deterministic offline tests.
 #[derive(Clone, Default)]
 pub struct MockMessageStore {
-    pub messages: Arc<Mutex<HashMap<(String, u64), (String, Vec<u8>)>>>,
+    pub messages: MessageStoreMap,
 }
 
 impl MockMessageStore {

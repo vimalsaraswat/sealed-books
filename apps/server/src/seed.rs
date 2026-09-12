@@ -6,10 +6,16 @@
 use crate::db::error::DbError;
 use crate::db::repository::account::Account;
 use crate::db::repository::entry::EntryExt;
+use crate::db::repository::membership::Membership;
+use crate::db::repository::organization::Organization;
 use crate::db::repository::period::PeriodRecord;
+use crate::db::repository::session::Session;
+use crate::db::repository::user::User;
 use rusqlite::Connection;
 use sealed_books_core::types::{Direction, Entry, Line};
 
+pub const DEMO_ORG_ID: &str = "org_acme";
+pub const DEMO_ORG_NAME: &str = "Acme Trading Pvt Ltd";
 pub const DEMO_PERIOD_ID: &str = "per_2026_08";
 pub const DEMO_ENTITY_NAME: &str = "Acme Trading Pvt Ltd";
 pub const DEMO_START_DATE: &str = "2026-08-01";
@@ -19,6 +25,8 @@ pub const DEMO_END_DATE: &str = "2026-08-31";
 ///
 /// Returns `Ok(true)` if seeding took place, or `Ok(false)` if data already existed.
 pub fn seed_if_empty(conn: &mut Connection) -> Result<bool, DbError> {
+    seed_auth_tenancy(conn)?;
+
     if PeriodRecord::find_by_id(conn, DEMO_PERIOD_ID).is_ok() {
         return Ok(false);
     }
@@ -28,82 +36,232 @@ pub fn seed_if_empty(conn: &mut Connection) -> Result<bool, DbError> {
 }
 
 /// Seeds all chart of accounts, the August 2026 accounting period, and 16 balanced transactions.
+/// Seeds organizations, users, memberships, and test sessions.
+pub fn seed_auth_tenancy(conn: &mut Connection) -> Result<(), DbError> {
+    let org1 = Organization {
+        id: DEMO_ORG_ID.into(),
+        name: DEMO_ORG_NAME.into(),
+        base_currency: "USD".into(),
+        created_at: "2026-08-01T00:00:00Z".into(),
+    };
+    let org2 = Organization {
+        id: "org_deloitte".into(),
+        name: "Deloitte Advisory LLP".into(),
+        base_currency: "USD".into(),
+        created_at: "2026-08-01T00:00:00Z".into(),
+    };
+    let _ = org1.insert(conn);
+    let _ = org2.insert(conn);
+
+    let users = vec![
+        User {
+            id: "usr_alice".into(),
+            email: "alice@acmetrading.com".into(),
+            name: "Alice Vance".into(),
+            pubkey: "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa".into(),
+            eth_address: "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        },
+        User {
+            id: "usr_bob".into(),
+            email: "bstone@auditfirm.com".into(),
+            name: "Bob Stone".into(),
+            pubkey: "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27".into(),
+            eth_address: "0x1563915e194d8cfba1943570603f7606a3115508".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        },
+        User {
+            id: "usr_charlie".into(),
+            email: "charlie@acmetrading.com".into(),
+            name: "Charlie Davis".into(),
+            pubkey: "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1".into(),
+            eth_address: "0x5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        },
+        User {
+            id: "usr_diana".into(),
+            email: "diana@acmetrading.com".into(),
+            name: "Diana Vance".into(),
+            pubkey: "032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991".into(),
+            eth_address: "0x7564105e977516c53be337314c7e53838967bdac".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        },
+    ];
+    for u in users {
+        let _ = u.insert(conn);
+    }
+
+    let memberships = vec![
+        Membership {
+            id: "mem_acme_alice".into(),
+            organization_id: DEMO_ORG_ID.into(),
+            user_id: "usr_alice".into(),
+            role: "controller".into(),
+            status: "active".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        },
+        Membership {
+            id: "mem_acme_bob".into(),
+            organization_id: DEMO_ORG_ID.into(),
+            user_id: "usr_bob".into(),
+            role: "auditor".into(),
+            status: "active".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        },
+        Membership {
+            id: "mem_deloitte_bob".into(),
+            organization_id: "org_deloitte".into(),
+            user_id: "usr_bob".into(),
+            role: "owner".into(),
+            status: "active".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        },
+        Membership {
+            id: "mem_acme_charlie".into(),
+            organization_id: DEMO_ORG_ID.into(),
+            user_id: "usr_charlie".into(),
+            role: "staff".into(),
+            status: "active".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        },
+        Membership {
+            id: "mem_acme_diana".into(),
+            organization_id: DEMO_ORG_ID.into(),
+            user_id: "usr_diana".into(),
+            role: "owner".into(),
+            status: "active".into(),
+            created_at: "2026-08-01T00:00:00Z".into(),
+        },
+    ];
+    for m in memberships {
+        let _ = m.insert(conn);
+    }
+
+    let sessions = vec![
+        Session {
+            token: "token_alice".into(),
+            user_id: "usr_alice".into(),
+            active_organization_id: DEMO_ORG_ID.into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        },
+        Session {
+            token: "token_bob".into(),
+            user_id: "usr_bob".into(),
+            active_organization_id: DEMO_ORG_ID.into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        },
+        Session {
+            token: "token_charlie".into(),
+            user_id: "usr_charlie".into(),
+            active_organization_id: DEMO_ORG_ID.into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        },
+        Session {
+            token: "token_diana".into(),
+            user_id: "usr_diana".into(),
+            active_organization_id: DEMO_ORG_ID.into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        },
+    ];
+    for s in sessions {
+        let _ = s.insert(conn);
+    }
+
+    Ok(())
+}
+
+/// Seeds all chart of accounts, the August 2026 accounting period, and 16 balanced transactions.
 pub fn seed_demo_data(conn: &mut Connection) -> Result<(), DbError> {
+    seed_auth_tenancy(conn)?;
+
     // 1. Chart of Accounts
     let accounts = vec![
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_1010".into(),
             code: "1010".into(),
             name: "HDFC Current Account".into(),
             account_type: "asset".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_1020".into(),
             code: "1020".into(),
             name: "Accounts Receivable".into(),
             account_type: "asset".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_1030".into(),
             code: "1030".into(),
             name: "Merchandise Inventory".into(),
             account_type: "asset".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_1040".into(),
             code: "1040".into(),
             name: "Office Security Deposit".into(),
             account_type: "asset".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_2010".into(),
             code: "2010".into(),
             name: "Accounts Payable - Suppliers".into(),
             account_type: "liability".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_2020".into(),
             code: "2020".into(),
             name: "Sales Tax & Duties Payable".into(),
             account_type: "liability".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_3010".into(),
             code: "3010".into(),
             name: "Share Capital".into(),
             account_type: "equity".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_4010".into(),
             code: "4010".into(),
             name: "Wholesale Sales Revenue".into(),
             account_type: "revenue".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_5010".into(),
             code: "5010".into(),
             name: "Cost of Goods Sold".into(),
             account_type: "expense".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_5020".into(),
             code: "5020".into(),
             name: "Office & Warehouse Rent".into(),
             account_type: "expense".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_5030".into(),
             code: "5030".into(),
             name: "Employee Salaries".into(),
             account_type: "expense".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_5040".into(),
             code: "5040".into(),
             name: "Cloud Hosting & SaaS Subscriptions".into(),
             account_type: "expense".into(),
         },
         Account {
+            organization_id: DEMO_ORG_ID.into(),
             id: "acc_5050".into(),
             code: "5050".into(),
             name: "Bank Charges & Wire Fees".into(),
@@ -121,6 +279,7 @@ pub fn seed_demo_data(conn: &mut Connection) -> Result<(), DbError> {
     // 2. Accounting Period
     let period = PeriodRecord {
         id: DEMO_PERIOD_ID.into(),
+        organization_id: DEMO_ORG_ID.into(),
         entity: DEMO_ENTITY_NAME.into(),
         start_date: DEMO_START_DATE.into(),
         end_date: DEMO_END_DATE.into(),
@@ -139,6 +298,7 @@ pub fn seed_demo_data(conn: &mut Connection) -> Result<(), DbError> {
 }
 
 /// Constructs the list of 16 balanced double-entry transactions for August 2026.
+#[allow(clippy::vec_init_then_push)]
 pub fn get_demo_entries() -> Result<Vec<Entry>, DbError> {
     let mut entries = Vec::with_capacity(16);
 
