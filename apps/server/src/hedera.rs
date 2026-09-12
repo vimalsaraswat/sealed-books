@@ -1,12 +1,15 @@
-//! Hedera Consensus Service client and publisher for Sealed Books Server.
+//! Hedera Consensus Service publisher client for Sealed Books Server.
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use hedera::{Client, PrivateKey, TopicId, TopicMessageSubmitTransaction};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use crate::mirror::MockMessageStore;
+
+/// Receipt returned after a successful Hedera topic message submission.
+#[derive(Debug, Clone)]
 pub struct PublishReceipt {
     pub topic_id: String,
     pub sequence_number: u64,
@@ -14,24 +17,25 @@ pub struct PublishReceipt {
     pub transaction_id: String,
 }
 
+/// Live Hedera testnet publisher using the official Hedera SDK client.
 #[derive(Clone)]
 pub struct HederaLivePublisher {
-    client: Arc<hedera::Client>,
+    client: Arc<Client>,
 }
 
 impl HederaLivePublisher {
     pub fn new_from_env() -> Result<Self, String> {
-        let operator_id_str = std::env::var("HEDERA_OPERATOR_ACCOUNT_ID")
-            .map_err(|_| "HEDERA_OPERATOR_ACCOUNT_ID not found in environment".to_string())?;
-        let operator_key_str = std::env::var("HEDERA_OPERATOR_KEY")
-            .map_err(|_| "HEDERA_OPERATOR_KEY not found in environment".to_string())?;
+        let account_id_str = std::env::var("HEDERA_OPERATOR_ID")
+            .map_err(|_| "HEDERA_OPERATOR_ID not set in environment".to_string())?;
+        let private_key_str = std::env::var("HEDERA_OPERATOR_KEY")
+            .map_err(|_| "HEDERA_OPERATOR_KEY not set in environment".to_string())?;
 
-        let operator_id = hedera::AccountId::from_str(&operator_id_str)
-            .map_err(|e| format!("Invalid HEDERA_OPERATOR_ACCOUNT_ID: {e}"))?;
-        let operator_key = hedera::PrivateKey::from_str(&operator_key_str)
+        let client = Client::for_testnet();
+        let operator_id = hedera::AccountId::from_str(&account_id_str)
+            .map_err(|e| format!("Invalid HEDERA_OPERATOR_ID: {e}"))?;
+        let operator_key = PrivateKey::from_str(&private_key_str)
             .map_err(|e| format!("Invalid HEDERA_OPERATOR_KEY: {e}"))?;
 
-        let client = hedera::Client::for_testnet();
         client.set_operator(operator_id, operator_key);
 
         Ok(Self {
@@ -44,17 +48,15 @@ impl HederaLivePublisher {
         topic_id_str: &str,
         message: &[u8],
     ) -> Result<PublishReceipt, String> {
-        let topic_id = hedera::TopicId::from_str(topic_id_str)
+        let topic_id = TopicId::from_str(topic_id_str)
             .map_err(|e| format!("Invalid topic ID {topic_id_str}: {e}"))?;
 
-        let mut tx = hedera::TopicMessageSubmitTransaction::new();
-        tx.topic_id(topic_id);
-        tx.message(message.to_vec());
-
-        let response = tx
+        let response = TopicMessageSubmitTransaction::new()
+            .topic_id(topic_id)
+            .message(message.to_vec())
             .execute(&*self.client)
             .await
-            .map_err(|e| format!("Hedera transaction execution failed: {e}"))?;
+            .map_err(|e| format!("Hedera HCS submit transaction failed: {e}"))?;
 
         let receipt = response
             .get_receipt(&*self.client)
@@ -77,21 +79,34 @@ impl HederaLivePublisher {
 #[derive(Clone)]
 pub struct MockPublisher {
     next_seq: Arc<AtomicU64>,
+    store: Option<MockMessageStore>,
 }
 
 impl MockPublisher {
     pub fn new() -> Self {
         Self {
             next_seq: Arc::new(AtomicU64::new(1)),
+            store: None,
         }
     }
 
-    pub async fn publish(&self, topic_id: &str, _message: &[u8]) -> Result<PublishReceipt, String> {
+    pub fn with_store(store: MockMessageStore) -> Self {
+        Self {
+            next_seq: Arc::new(AtomicU64::new(1)),
+            store: Some(store),
+        }
+    }
+
+    pub async fn publish(&self, topic_id: &str, message: &[u8]) -> Result<PublishReceipt, String> {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let now = Utc::now();
         let ts_sec = now.timestamp();
         let ts_subsec = now.timestamp_subsec_nanos();
         let consensus_ts = format!("{ts_sec}.{ts_subsec:09}");
+
+        if let Some(store) = &self.store {
+            store.insert(topic_id, seq, &consensus_ts, message);
+        }
 
         Ok(PublishReceipt {
             topic_id: topic_id.to_string(),
@@ -113,14 +128,18 @@ impl PublisherClient {
         PublisherClient::Mock(MockPublisher::new())
     }
 
+    pub fn mock_with_store(store: MockMessageStore) -> Self {
+        PublisherClient::Mock(MockPublisher::with_store(store))
+    }
+
     pub fn live_from_env() -> Result<Self, String> {
         Ok(PublisherClient::Live(HederaLivePublisher::new_from_env()?))
     }
 
     pub async fn publish(&self, topic_id: &str, message: &[u8]) -> Result<PublishReceipt, String> {
         match self {
-            PublisherClient::Live(p) => p.publish(topic_id, message).await,
-            PublisherClient::Mock(p) => p.publish(topic_id, message).await,
+            Self::Live(live) => live.publish(topic_id, message).await,
+            Self::Mock(mock) => mock.publish(topic_id, message).await,
         }
     }
 }

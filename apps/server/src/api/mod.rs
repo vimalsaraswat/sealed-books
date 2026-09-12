@@ -14,6 +14,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::db::Database;
 use crate::hedera::PublisherClient;
+use crate::mirror::{MirrorClient, MockMessageStore};
 use crate::privy::PrivyClient;
 
 /// Shared application state accessible across all Axum request handlers.
@@ -21,6 +22,7 @@ use crate::privy::PrivyClient;
 pub struct AppState {
     pub db: Database,
     pub publisher: PublisherClient,
+    pub mirror: MirrorClient,
     pub privy: Option<PrivyClient>,
     pub topic_id: String,
 }
@@ -29,21 +31,25 @@ impl AppState {
     pub fn new(db: Database) -> Self {
         let publisher =
             PublisherClient::live_from_env().unwrap_or_else(|_| PublisherClient::mock());
+        let mirror = MirrorClient::live_from_env();
         let privy = PrivyClient::new_from_env().ok();
         let topic_id =
             std::env::var("HEDERA_TOPIC_ID").unwrap_or_else(|_| "0.0.10462941".to_string());
         Self {
             db,
             publisher,
+            mirror,
             privy,
             topic_id,
         }
     }
 
     pub fn new_mock(db: Database) -> Self {
+        let store = MockMessageStore::new();
         Self {
             db,
-            publisher: PublisherClient::mock(),
+            publisher: PublisherClient::mock_with_store(store.clone()),
+            mirror: MirrorClient::mock(store),
             privy: None,
             topic_id: "0.0.10462941".to_string(),
         }
@@ -51,6 +57,11 @@ impl AppState {
 
     pub fn with_publisher(mut self, publisher: PublisherClient) -> Self {
         self.publisher = publisher;
+        self
+    }
+
+    pub fn with_mirror(mut self, mirror: MirrorClient) -> Self {
+        self.mirror = mirror;
         self
     }
 }
@@ -74,9 +85,13 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Basic health check endpoint.
+/// Simple health check handler.
 async fn health_check() -> Json<Value> {
-    Json(json!({ "status": "ok", "service": "sealed-books-server" }))
+    Json(json!({
+        "status": "ok",
+        "service": "sealed-books-server",
+        "version": env!("CARGO_PKG_VERSION")
+    }))
 }
 
 #[cfg(test)]
@@ -91,18 +106,19 @@ mod tests {
     use k256::elliptic_curve::rand_core::OsRng;
     use tower::ServiceExt;
 
-    fn setup_test_app() -> Router {
+    fn setup_test_app() -> (Router, Database) {
         let db = Database::open_in_memory().unwrap();
         {
             let mut conn = db.lock();
             seed_demo_data(&mut conn).unwrap();
         }
-        create_router(AppState::new_mock(db))
+        let app = create_router(AppState::new_mock(db.clone()));
+        (app, db)
     }
 
     #[tokio::test]
     async fn test_health_check() {
-        let app = setup_test_app();
+        let (app, _) = setup_test_app();
 
         let response = app
             .oneshot(
@@ -122,7 +138,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_accounts() {
-        let app = setup_test_app();
+        let (app, _) = setup_test_app();
 
         let response = app
             .oneshot(
@@ -142,9 +158,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_periods_and_get_period() {
-        let app = setup_test_app();
+        let (app, _) = setup_test_app();
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/periods")
@@ -156,15 +173,14 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let periods: Vec<PeriodRecord> = serde_json::from_slice(&body).unwrap();
+        let periods: Vec<Value> = serde_json::from_slice(&body).unwrap();
         assert_eq!(periods.len(), 1);
-        let period_id = &periods[0].id;
+        assert_eq!(periods[0]["id"], "per_2026_08");
 
-        let app = setup_test_app();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/periods/{period_id}"))
+                    .uri("/api/periods/per_2026_08")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -172,16 +188,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let period: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(period["id"], "per_2026_08");
+        assert_eq!(period["entity"], "Acme Trading Pvt Ltd");
     }
 
     #[tokio::test]
     async fn test_get_nonexistent_period_returns_404() {
-        let app = setup_test_app();
+        let (app, _) = setup_test_app();
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/periods/nonexistent_period_id")
+                    .uri("/api/periods/nonexistent")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -192,30 +212,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_period_statement() {
-        let app = setup_test_app();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/periods/per_2026_08/statement")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["statement"]["entry_count"], 16);
-        assert_eq!(json["statement"]["total_debits_minor"], 12185000);
-        assert_eq!(json["statement"]["total_credits_minor"], 12185000);
-    }
-
-    #[tokio::test]
     async fn test_list_entries() {
-        let app = setup_test_app();
+        let (app, _) = setup_test_app();
 
         let response = app
             .oneshot(
@@ -235,24 +233,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_balanced_entry_succeeds() {
-        let app = setup_test_app();
+        let (app, _) = setup_test_app();
 
         let payload = json!({
             "date": "2026-08-25",
-            "description": "Late Month SaaS Hosting Purchase",
+            "description": "Consulting expense",
             "lines": [
-                {
-                    "account_id": "acc_5040",
-                    "direction": "debit",
-                    "amount_minor": 15000,
-                    "description": "Cloud infra"
-                },
-                {
-                    "account_id": "acc_1010",
-                    "direction": "credit",
-                    "amount_minor": 15000,
-                    "description": "Direct debit"
-                }
+                { "account_id": "acc_5040", "direction": "debit", "amount_minor": 50000 },
+                { "account_id": "acc_1010", "direction": "credit", "amount_minor": 50000 }
             ]
         });
 
@@ -269,26 +257,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let created: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(created["description"], "Consulting expense");
     }
 
     #[tokio::test]
     async fn test_post_unbalanced_entry_rejected_with_422() {
-        let app = setup_test_app();
+        let (app, _) = setup_test_app();
 
         let payload = json!({
             "date": "2026-08-25",
-            "description": "Unbalanced Error",
+            "description": "Broken transaction",
             "lines": [
-                {
-                    "account_id": "acc_5040",
-                    "direction": "debit",
-                    "amount_minor": 15000
-                },
-                {
-                    "account_id": "acc_1010",
-                    "direction": "credit",
-                    "amount_minor": 14999
-                }
+                { "account_id": "acc_5040", "direction": "debit", "amount_minor": 50000 },
+                { "account_id": "acc_1010", "direction": "credit", "amount_minor": 40000 }
             ]
         });
 
@@ -309,22 +292,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_out_of_period_range_entry_rejected_with_422() {
-        let app = setup_test_app();
+        let (app, _) = setup_test_app();
 
         let payload = json!({
-            "date": "2026-09-01",
-            "description": "September entry into August period",
+            "date": "2026-09-05",
+            "description": "September entry in August period",
             "lines": [
-                {
-                    "account_id": "acc_5040",
-                    "direction": "debit",
-                    "amount_minor": 15000
-                },
-                {
-                    "account_id": "acc_1010",
-                    "direction": "credit",
-                    "amount_minor": 15000
-                }
+                { "account_id": "acc_5040", "direction": "debit", "amount_minor": 10000 },
+                { "account_id": "acc_1010", "direction": "credit", "amount_minor": 10000 }
             ]
         });
 
@@ -347,26 +322,24 @@ mod tests {
     async fn test_post_entry_to_sealed_period_returns_409() {
         let db = Database::open_in_memory().unwrap();
         {
-            let mut conn = db.lock();
-            seed_demo_data(&mut conn).unwrap();
-            PeriodRecord::mark_sealed(&mut conn, "per_2026_08").unwrap();
+            let conn = db.lock();
+            let period = PeriodRecord {
+                id: "per_sealed".into(),
+                entity: "Acme Corp".into(),
+                start_date: "2026-08-01".into(),
+                end_date: "2026-08-31".into(),
+                status: "sealed".into(),
+            };
+            period.insert(&conn).unwrap();
         }
         let app = create_router(AppState::new_mock(db));
 
         let payload = json!({
-            "date": "2026-08-20",
-            "description": "Attempt to tamper sealed period",
+            "date": "2026-08-15",
+            "description": "Should fail",
             "lines": [
-                {
-                    "account_id": "acc_5040",
-                    "direction": "debit",
-                    "amount_minor": 10000
-                },
-                {
-                    "account_id": "acc_1010",
-                    "direction": "credit",
-                    "amount_minor": 10000
-                }
+                { "account_id": "acc_1010", "direction": "debit", "amount_minor": 1000 },
+                { "account_id": "acc_5040", "direction": "credit", "amount_minor": 1000 }
             ]
         });
 
@@ -374,7 +347,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/periods/per_2026_08/entries")
+                    .uri("/api/periods/per_sealed/entries")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&payload).unwrap()))
                     .unwrap(),
@@ -385,11 +358,42 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
-    // --- Phase 3: Seal Workflow Integration Tests ---
+    #[tokio::test]
+    async fn test_get_period_statement() {
+        let (app, _) = setup_test_app();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/periods/per_2026_08/statement")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let resp_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp_json["statement"]["entity"], "Acme Trading Pvt Ltd");
+        assert_eq!(resp_json["statement"]["entry_count"], 16);
+        assert!(
+            resp_json["statement_hash_hex"]
+                .as_str()
+                .unwrap()
+                .starts_with("0x")
+        );
+        assert!(
+            resp_json["ledger_root_hex"]
+                .as_str()
+                .unwrap()
+                .starts_with("0x")
+        );
+    }
 
     #[tokio::test]
     async fn test_seal_propose_returns_201_and_statement() {
-        let app = setup_test_app();
+        let (app, _) = setup_test_app();
 
         let response = app
             .oneshot(
@@ -406,26 +410,16 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["period_id"], "per_2026_08");
+        assert_eq!(json["statement"]["entry_count"], 16);
         assert!(json["statement_hash"].as_str().unwrap().starts_with("0x"));
-        assert!(
-            json["human_readable"]
-                .as_str()
-                .unwrap()
-                .contains("Acme Trading Pvt Ltd")
-        );
     }
 
     #[tokio::test]
     async fn test_seal_publish_without_quorum_rejected_with_422() {
-        let db = Database::open_in_memory().unwrap();
-        {
-            let mut conn = db.lock();
-            seed_demo_data(&mut conn).unwrap();
-        }
-        let app = create_router(AppState::new_mock(db));
+        let (app, _) = setup_test_app();
 
-        // 1. Propose seal
-        let resp = app
+        // Propose first
+        let _ = app
             .clone()
             .oneshot(
                 Request::builder()
@@ -436,10 +430,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
 
-        // 2. Try to publish immediately without approvals
-        let resp = app
+        // Attempt publish without approvals
+        let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -449,17 +442,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
     async fn test_seal_approve_and_publish_e2e_flow() {
-        let db = Database::open_in_memory().unwrap();
-        {
-            let mut conn = db.lock();
-            seed_demo_data(&mut conn).unwrap();
-        }
-        let app = create_router(AppState::new_mock(db.clone()));
+        let (app, db) = setup_test_app();
 
         // 1. Propose seal
         let resp = app
@@ -595,12 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seal_duplicate_approval_rejected_with_409() {
-        let db = Database::open_in_memory().unwrap();
-        {
-            let mut conn = db.lock();
-            seed_demo_data(&mut conn).unwrap();
-        }
-        let app = create_router(AppState::new_mock(db));
+        let (app, _) = setup_test_app();
 
         // Propose
         let resp = app

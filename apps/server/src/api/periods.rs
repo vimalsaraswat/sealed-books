@@ -11,6 +11,7 @@ use crate::api::error::ApiError;
 use crate::api::seal;
 use crate::db::repository::entry::EntryExt;
 use crate::db::repository::period::PeriodRecord;
+use crate::verify::VerificationReport;
 use sealed_books_core::hash::statement_hash;
 use sealed_books_core::merkle::build_statement;
 use sealed_books_core::types::{Entry, SealStatement};
@@ -21,6 +22,7 @@ pub fn router() -> Router<AppState> {
         .route("/", get(list_periods))
         .route("/:id", get(get_period))
         .route("/:id/statement", get(get_period_statement))
+        .route("/:id/verify", get(verify_period_handler))
         .nest("/:id/entries", entries::router())
         .nest("/:id/seal", seal::router())
 }
@@ -76,4 +78,15 @@ pub async fn get_period_statement(
         ledger_root_hex,
         human_readable,
     }))
+}
+
+/// Runs independent verification for an accounting period against Hedera mirror node.
+pub async fn verify_period_handler(
+    State(state): State<AppState>,
+    Path(period_id): Path<String>,
+) -> Result<Json<VerificationReport>, ApiError> {
+    let report = crate::verify::verify_period(&state.db, &state.mirror, &period_id)
+        .await
+        .map_err(ApiError::BadRequest)?;
+    Ok(Json(report))
 }

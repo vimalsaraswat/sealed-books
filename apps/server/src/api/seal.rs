@@ -1,4 +1,4 @@
-//! Period seal workflow API handlers (propose, approve, publish).
+//! Period seal workflow API handlers (propose, approve, publish, verify).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -13,6 +13,7 @@ use crate::crypto;
 use crate::db::repository::entry::EntryExt;
 use crate::db::repository::period::PeriodRecord;
 use crate::db::repository::seal::SealRecord;
+use crate::verify::VerificationReport;
 use sealed_books_core::types::{Entry, SealPayload, SealStatement};
 use sealed_books_core::{build_statement, encode_seal_payload, statement_hash};
 
@@ -45,7 +46,7 @@ pub struct ApproveResponse {
     pub quorum_met: bool,
 }
 
-/// Response returned when a seal is published to Hedera.
+/// Response returned when a seal is published to Hedera Consensus Service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishResponse {
     pub status: String,
@@ -74,6 +75,7 @@ pub fn router() -> Router<AppState> {
         .route("/propose", post(propose_seal))
         .route("/approve", post(approve_seal))
         .route("/publish", post(publish_seal))
+        .route("/verify", get(verify_seal))
 }
 
 /// Retrieves the current seal progress or sealed status for a period.
@@ -85,9 +87,8 @@ async fn get_seal_state(
     let period = PeriodRecord::find_by_id(&conn, &period_id)?;
     let seal = SealRecord::find_by_period_id(&conn, &period_id).ok();
 
-    let approvals_collected = seal
-        .as_ref()
-        .map(|s| {
+    let approvals_collected = match &seal {
+        Some(s) => {
             let mut count = 0;
             if s.approver_1_pubkey.is_some() && s.approver_1_sig.is_some() {
                 count += 1;
@@ -96,46 +97,49 @@ async fn get_seal_state(
                 count += 1;
             }
             count
-        })
-        .unwrap_or(0);
+        }
+        None => 0,
+    };
+
+    let quorum_met = approvals_collected >= 2;
 
     Ok(Json(SealStateResponse {
         period_id,
         period_status: period.status,
-        approvals_collected,
-        quorum_met: approvals_collected >= 2,
         seal,
+        approvals_collected,
+        quorum_met,
     }))
 }
 
-/// Proposes a seal for an open period by computing its canonical statement and hash.
+/// Proposes a seal for an open period: builds the canonical statement and hash.
 async fn propose_seal(
     State(state): State<AppState>,
     Path(period_id): Path<String>,
 ) -> Result<(StatusCode, Json<ProposeResponse>), ApiError> {
     let conn = state.db.lock();
     let period = PeriodRecord::find_by_id(&conn, &period_id)?;
-
     if period.status == "sealed" {
         return Err(ApiError::Conflict(
-            "Period is already sealed; cannot re-propose".into(),
+            "Period is already sealed and cannot be reproposed".into(),
         ));
     }
 
     let entries = Entry::find_by_period(&conn, &period_id)?;
     let core_period = period.to_core();
-
     let statement = build_statement(&core_period, &entries)?;
-    let st_hash = statement_hash(&statement);
-    let st_hash_hex = format!("0x{}", hex::encode(st_hash));
-    let root_hex = format!("0x{}", hex::encode(statement.ledger_root));
+
+    let statement_hash_bytes = statement_hash(&statement);
+    let statement_hash_hex = format!("0x{}", hex::encode(statement_hash_bytes));
+    let ledger_root_hex = format!("0x{}", hex::encode(statement.ledger_root));
     let human_readable = statement.to_human_readable();
 
-    let seal_record = SealRecord {
-        id: format!("seal_{period_id}"),
+    let seal_id = format!("seal_{period_id}");
+    let seal = SealRecord {
+        id: seal_id,
         period_id: period_id.clone(),
-        root: root_hex,
-        statement_hash: st_hash_hex.clone(),
+        root: ledger_root_hex,
+        statement_hash: statement_hash_hex.clone(),
         topic_id: None,
         sequence_number: None,
         consensus_timestamp: None,
@@ -146,14 +150,14 @@ async fn propose_seal(
         created_at: Utc::now().to_rfc3339(),
     };
 
-    seal_record.upsert(&conn)?;
+    seal.upsert(&conn)?;
 
     Ok((
         StatusCode::CREATED,
         Json(ProposeResponse {
             period_id,
             statement,
-            statement_hash: st_hash_hex,
+            statement_hash: statement_hash_hex,
             human_readable,
         }),
     ))
@@ -167,164 +171,144 @@ async fn approve_seal(
 ) -> Result<Json<ApproveResponse>, ApiError> {
     let mut seal = {
         let conn = state.db.lock();
-        let period = PeriodRecord::find_by_id(&conn, &period_id)?;
-        if period.status == "sealed" {
+        let p = PeriodRecord::find_by_id(&conn, &period_id)?;
+        if p.status == "sealed" {
             return Err(ApiError::Conflict("Period is already sealed".into()));
         }
-        SealRecord::find_by_period_id(&conn, &period_id).map_err(|_| {
-            ApiError::NotFound("No seal proposal found for this period. Call /propose first".into())
-        })?
+        SealRecord::find_by_period_id(&conn, &period_id)
+            .map_err(|_| ApiError::BadRequest("Seal must be proposed before approving".into()))?
     };
 
-    let hash_bytes_vec = hex::decode(seal.statement_hash.trim_start_matches("0x"))
-        .map_err(|e| ApiError::Internal(format!("Invalid statement hash in DB: {e}")))?;
-    if hash_bytes_vec.len() != 32 {
-        return Err(ApiError::Internal(
-            "Stored statement hash is not 32 bytes".into(),
-        ));
-    }
-    let mut hash_bytes = [0u8; 32];
-    hash_bytes.copy_from_slice(&hash_bytes_vec);
+    let (approver_pubkey_hex, signature_hex) = match (&payload.approver_pubkey, &payload.signature)
+    {
+        (Some(pk), Some(sig)) => {
+            let pk_clean = pk.trim_start_matches("0x");
+            let sig_clean = sig.trim_start_matches("0x");
 
-    let (pubkey_hex, sig_hex) = if let Some(wallet_id) = payload.wallet_id {
-        let privy_client = state.privy.as_ref().ok_or_else(|| {
-            ApiError::Unprocessable(
-                "Privy client is not configured for server-assisted signing".into(),
-            )
-        })?;
+            let pk_bytes = hex::decode(pk_clean)
+                .map_err(|_| ApiError::BadRequest("Invalid hex in approver_pubkey".into()))?;
+            let sig_bytes = hex::decode(sig_clean)
+                .map_err(|_| ApiError::BadRequest("Invalid hex in signature".into()))?;
 
-        let (sig_64, recovered) = privy_client
-            .sign_hash(&wallet_id, &hash_bytes)
-            .await
-            .map_err(ApiError::Unprocessable)?;
+            let st_hash_clean = seal.statement_hash.trim_start_matches("0x");
+            let st_hash_bytes = hex::decode(st_hash_clean)
+                .map_err(|_| ApiError::Internal("Invalid statement hash in db".into()))?;
 
-        (
-            recovered.compressed_pubkey_hex,
-            format!("0x{}", hex::encode(sig_64)),
-        )
-    } else if let (Some(pk_raw), Some(sig_raw)) = (payload.approver_pubkey, payload.signature) {
-        let pk_clean = pk_raw.trim_start_matches("0x");
-        let pk_bytes = hex::decode(pk_clean)
-            .map_err(|e| ApiError::BadRequest(format!("Invalid public key hex: {e}")))?;
-        if pk_bytes.len() != 33 {
-            return Err(ApiError::BadRequest(format!(
-                "Expected 33-byte compressed public key, got {} bytes",
-                pk_bytes.len()
-            )));
+            crypto::verify_with_pubkey(&st_hash_bytes, &sig_bytes, &pk_bytes)
+                .map_err(|e| ApiError::BadRequest(format!("Signature verification failed: {e}")))?;
+
+            (format!("0x{pk_clean}"), format!("0x{sig_clean}"))
         }
-
-        let sig_clean = sig_raw.trim_start_matches("0x");
-        let sig_bytes = hex::decode(sig_clean)
-            .map_err(|e| ApiError::BadRequest(format!("Invalid signature hex: {e}")))?;
-
-        let (sig_64, v_opt) =
-            crypto::split_signature(&sig_bytes).map_err(|e| ApiError::BadRequest(e))?;
-
-        if let Some(v_byte) = v_opt {
-            let recovered =
-                crypto::verify_and_recover(&hash_bytes, sig_64, v_byte).map_err(|e| {
-                    ApiError::Unprocessable(format!("Cryptographic verification failed: {e}"))
+        _ => match &payload.wallet_id {
+            Some(wid) => {
+                let privy = state.privy.as_ref().ok_or_else(|| {
+                    ApiError::Internal("Privy client is not configured on this server".into())
                 })?;
-            if !recovered
-                .compressed_pubkey_hex
-                .eq_ignore_ascii_case(&format!("0x{pk_clean}"))
-            {
-                return Err(ApiError::Unprocessable(
-                    "Recovered public key does not match claimed approver public key".into(),
+
+                let st_hash_clean = seal.statement_hash.trim_start_matches("0x");
+                let st_hash_vec = hex::decode(st_hash_clean)
+                    .map_err(|_| ApiError::Internal("Invalid statement hash in db".into()))?;
+                let mut st_hash_bytes = [0u8; 32];
+                st_hash_bytes.copy_from_slice(&st_hash_vec);
+
+                let (sig_64, recovered_info) = privy
+                    .sign_hash(wid, &st_hash_bytes)
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("Privy signing error: {e}")))?;
+
+                (
+                    recovered_info.compressed_pubkey_hex,
+                    format!("0x{}", hex::encode(sig_64)),
+                )
+            }
+            None => {
+                return Err(ApiError::BadRequest(
+                    "Must provide either (approver_pubkey, signature) or wallet_id".into(),
                 ));
             }
-        } else {
-            crypto::verify_with_pubkey(&hash_bytes, sig_64, &pk_bytes).map_err(|e| {
-                ApiError::Unprocessable(format!("Signature verification failed: {e}"))
-            })?;
-        }
-
-        (
-            format!("0x{pk_clean}"),
-            format!("0x{}", hex::encode(sig_64)),
-        )
-    } else {
-        return Err(ApiError::BadRequest(
-            "Either wallet_id or (approver_pubkey, signature) must be provided".into(),
-        ));
+        },
     };
 
-    if seal.approver_1_pubkey.as_deref() == Some(&pubkey_hex)
-        || seal.approver_2_pubkey.as_deref() == Some(&pubkey_hex)
-    {
-        return Err(ApiError::Conflict(
-            "This approver has already signed the seal proposal".into(),
-        ));
+    if let Some(existing_p1) = &seal.approver_1_pubkey {
+        if existing_p1.eq_ignore_ascii_case(&approver_pubkey_hex) {
+            return Err(ApiError::Conflict(
+                "This approver has already signed the proposed seal".into(),
+            ));
+        }
+    }
+
+    if let Some(existing_p2) = &seal.approver_2_pubkey {
+        if existing_p2.eq_ignore_ascii_case(&approver_pubkey_hex) {
+            return Err(ApiError::Conflict(
+                "This approver has already signed the proposed seal".into(),
+            ));
+        }
     }
 
     if seal.approver_1_pubkey.is_none() {
-        seal.approver_1_pubkey = Some(pubkey_hex.clone());
-        seal.approver_1_sig = Some(sig_hex);
+        seal.approver_1_pubkey = Some(approver_pubkey_hex.clone());
+        seal.approver_1_sig = Some(signature_hex);
     } else if seal.approver_2_pubkey.is_none() {
-        seal.approver_2_pubkey = Some(pubkey_hex.clone());
-        seal.approver_2_sig = Some(sig_hex);
+        seal.approver_2_pubkey = Some(approver_pubkey_hex.clone());
+        seal.approver_2_sig = Some(signature_hex);
     } else {
         return Err(ApiError::Conflict(
-            "Both required approver slots are already filled".into(),
+            "Both required approvals have already been collected".into(),
         ));
     }
-
-    let approvals_collected = {
-        let mut c = 0;
-        if seal.approver_1_pubkey.is_some() {
-            c += 1;
-        }
-        if seal.approver_2_pubkey.is_some() {
-            c += 1;
-        }
-        c
-    };
 
     {
         let conn = state.db.lock();
         seal.upsert(&conn)?;
     }
 
+    let approvals_collected = match (
+        seal.approver_1_pubkey.is_some(),
+        seal.approver_2_pubkey.is_some(),
+    ) {
+        (true, true) => 2,
+        (true, false) => 1,
+        _ => 0,
+    };
+
     Ok(Json(ApproveResponse {
         period_id,
-        approver_pubkey: pubkey_hex,
+        approver_pubkey: approver_pubkey_hex,
         approvals_collected,
         quorum_met: approvals_collected >= 2,
     }))
 }
 
-/// Publishes a fully approved seal payload to Hedera Consensus Service and marks the period sealed.
+/// Publishes the sealed period to Hedera Consensus Service once 2-of-n approvals are collected.
 async fn publish_seal(
     State(state): State<AppState>,
     Path(period_id): Path<String>,
 ) -> Result<Json<PublishResponse>, ApiError> {
-    let (period, mut seal) = {
+    let (mut seal, period) = {
         let conn = state.db.lock();
-        let period = PeriodRecord::find_by_id(&conn, &period_id)?;
-        if period.status == "sealed" {
-            return Err(ApiError::Conflict("Period is already sealed".into()));
+        let p = PeriodRecord::find_by_id(&conn, &period_id)?;
+        if p.status == "sealed" {
+            return Err(ApiError::Conflict(
+                "Period is already sealed and published".into(),
+            ));
         }
-        let seal = SealRecord::find_by_period_id(&conn, &period_id).map_err(|_| {
-            ApiError::NotFound(
-                "No seal proposal found for this period. Call /propose and /approve first".into(),
-            )
-        })?;
-        (period, seal)
+        let s = SealRecord::find_by_period_id(&conn, &period_id)
+            .map_err(|_| ApiError::BadRequest("Seal has not been proposed".into()))?;
+        (s, p)
     };
 
     let p1_hex = seal
         .approver_1_pubkey
         .as_deref()
-        .ok_or_else(|| ApiError::Unprocessable("Approver 1 signature is missing".into()))?;
+        .ok_or_else(|| ApiError::Unprocessable("Approver 1 is missing".into()))?;
     let s1_hex = seal
         .approver_1_sig
         .as_deref()
         .ok_or_else(|| ApiError::Unprocessable("Approver 1 signature is missing".into()))?;
-    let p2_hex = seal.approver_2_pubkey.as_deref().ok_or_else(|| {
-        ApiError::Unprocessable(
-            "Approver 2 signature is missing; minimum 2 distinct approvers required".into(),
-        )
-    })?;
+    let p2_hex = seal
+        .approver_2_pubkey
+        .as_deref()
+        .ok_or_else(|| ApiError::Unprocessable("Approver 2 is missing".into()))?;
     let s2_hex = seal
         .approver_2_sig
         .as_deref()
@@ -351,15 +335,21 @@ async fn publish_seal(
     let mut approver_2_sig = [0u8; 64];
 
     approver_1_pubkey.copy_from_slice(&p1_bytes);
-    approver_1_sig.copy_from_slice(&s1_bytes);
+    approver_1_sig.copy_from_slice(&s1_bytes[..64]);
     approver_2_pubkey.copy_from_slice(&p2_bytes);
-    approver_2_sig.copy_from_slice(&s2_bytes);
+    approver_2_sig.copy_from_slice(&s2_bytes[..64]);
 
-    let current_statement = {
+    let (current_statement, leaf_hashes) = {
         let conn = state.db.lock();
         let entries = Entry::find_by_period(&conn, &period_id)?;
         let core_period = period.to_core();
-        build_statement(&core_period, &entries)?
+        let mut leaves = Vec::with_capacity(entries.len());
+        for e in &entries {
+            let h = sealed_books_core::hash_entry(e)?;
+            leaves.push((e.id.clone(), h));
+        }
+        let st = build_statement(&core_period, &entries)?;
+        (st, leaves)
     };
 
     let current_hash_hex = format!("0x{}", hex::encode(statement_hash(&current_statement)));
@@ -392,6 +382,7 @@ async fn publish_seal(
         seal.consensus_timestamp = Some(receipt.consensus_timestamp.clone());
         seal.upsert(&conn)?;
 
+        SealRecord::save_leaves(&conn, &period_id, &leaf_hashes)?;
         PeriodRecord::mark_sealed(&conn, &period_id)?;
     }
 
@@ -406,4 +397,15 @@ async fn publish_seal(
         hashscan_url,
         payload_bytes_len: payload_bytes.len(),
     }))
+}
+
+/// Runs independent verification for the accounting period.
+async fn verify_seal(
+    State(state): State<AppState>,
+    Path(period_id): Path<String>,
+) -> Result<Json<VerificationReport>, ApiError> {
+    let report = crate::verify::verify_period(&state.db, &state.mirror, &period_id)
+        .await
+        .map_err(ApiError::BadRequest)?;
+    Ok(Json(report))
 }

@@ -58,11 +58,20 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
             created_at TEXT NOT NULL
         );
 
+        -- Deterministic sealed leaf hashes for pinpointing tampered entries
+        CREATE TABLE IF NOT EXISTS seal_leaves (
+            period_id TEXT NOT NULL REFERENCES periods(id),
+            entry_id TEXT NOT NULL,
+            leaf_hash TEXT NOT NULL,
+            PRIMARY KEY (period_id, entry_id)
+        );
+
         -- Indexes for fast query performance
         CREATE INDEX IF NOT EXISTS idx_entries_period_id ON entries(period_id);
         CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(date);
         CREATE INDEX IF NOT EXISTS idx_lines_entry_id ON lines(entry_id);
         CREATE INDEX IF NOT EXISTS idx_lines_account_id ON lines(account_id);
+        CREATE INDEX IF NOT EXISTS idx_seal_leaves_period_id ON seal_leaves(period_id);
         ",
     )?;
 
@@ -96,5 +105,6 @@ mod tests {
         assert!(tables.contains(&"entries".to_string()));
         assert!(tables.contains(&"lines".to_string()));
         assert!(tables.contains(&"seals".to_string()));
+        assert!(tables.contains(&"seal_leaves".to_string()));
     }
 }

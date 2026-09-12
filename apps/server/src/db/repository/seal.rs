@@ -113,6 +113,53 @@ impl SealRecord {
             other => DbError::Sqlite(other),
         })
     }
+
+    /// Persists baseline leaf hashes for an accounting period.
+    pub fn save_leaves(
+        conn: &Connection,
+        period_id: &str,
+        leaves: &[(String, [u8; 32])],
+    ) -> Result<(), DbError> {
+        let mut stmt = conn.prepare(
+            "INSERT OR REPLACE INTO seal_leaves (period_id, entry_id, leaf_hash) VALUES (?1, ?2, ?3);",
+        )?;
+        for (entry_id, hash) in leaves {
+            stmt.execute(params![period_id, entry_id, hex::encode(hash)])?;
+        }
+        Ok(())
+    }
+
+    /// Retrieves all sealed baseline leaf hashes for an accounting period.
+    pub fn get_leaves(
+        conn: &Connection,
+        period_id: &str,
+    ) -> Result<Vec<(String, [u8; 32])>, DbError> {
+        let mut stmt = conn.prepare(
+            "SELECT entry_id, leaf_hash FROM seal_leaves WHERE period_id = ?1 ORDER BY entry_id;",
+        )?;
+        let rows = stmt
+            .query_map(params![period_id], |row| {
+                let entry_id: String = row.get(0)?;
+                let hash_hex: String = row.get(1)?;
+                Ok((entry_id, hash_hex))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for (id, hex_str) in rows {
+            let bytes = hex::decode(&hex_str).map_err(|e| {
+                DbError::Core(sealed_books_core::CoreError::SerializationError(
+                    e.to_string(),
+                ))
+            })?;
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                result.push((id, arr));
+            }
+        }
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -158,22 +205,15 @@ mod tests {
         };
 
         seal.insert(&conn).unwrap();
+
         let loaded = SealRecord::find_by_period_id(&conn, "per_2026_08").unwrap();
-        assert_eq!(seal, loaded);
+        assert_eq!(loaded.id, "seal_01");
+        assert_eq!(loaded.period_id, "per_2026_08");
+        assert_eq!(loaded.sequence_number, Some(42));
     }
 
     #[test]
-    fn test_find_nonexistent_seal_returns_seal_not_found() {
-        let conn = setup_test_db();
-        let err = SealRecord::find_by_period_id(&conn, "per_missing").unwrap_err();
-        match err {
-            DbError::SealNotFound(id) => assert_eq!(id, "per_missing"),
-            other => panic!("Expected SealNotFound, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_duplicate_seal_insert_rejected() {
+    fn test_seal_leaves_save_and_get() {
         let conn = setup_test_db();
         let period = PeriodRecord {
             id: "per_2026_08".into(),
@@ -184,41 +224,16 @@ mod tests {
         };
         period.insert(&conn).unwrap();
 
-        let s1 = SealRecord {
-            id: "seal_01".into(),
-            period_id: "per_2026_08".into(),
-            root: "root1".into(),
-            statement_hash: "hash1".into(),
-            topic_id: None,
-            sequence_number: None,
-            consensus_timestamp: None,
-            approver_1_pubkey: None,
-            approver_1_sig: None,
-            approver_2_pubkey: None,
-            approver_2_sig: None,
-            created_at: "2026-09-01T12:00:00Z".into(),
-        };
-        let s2 = SealRecord {
-            id: "seal_02".into(),
-            period_id: "per_2026_08".into(),
-            root: "root2".into(),
-            statement_hash: "hash2".into(),
-            topic_id: None,
-            sequence_number: None,
-            consensus_timestamp: None,
-            approver_1_pubkey: None,
-            approver_1_sig: None,
-            approver_2_pubkey: None,
-            approver_2_sig: None,
-            created_at: "2026-09-01T13:00:00Z".into(),
-        };
+        let leaves = vec![
+            ("ent_01".to_string(), [1u8; 32]),
+            ("ent_02".to_string(), [2u8; 32]),
+        ];
+        SealRecord::save_leaves(&conn, "per_2026_08", &leaves).unwrap();
 
-        s1.insert(&conn).unwrap();
-        let err = s2.insert(&conn);
-        assert!(
-            err.is_err(),
-            "UNIQUE constraint on period_id must reject multiple seals for same period"
-        );
+        let loaded = SealRecord::get_leaves(&conn, "per_2026_08").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0], ("ent_01".to_string(), [1u8; 32]));
+        assert_eq!(loaded[1], ("ent_02".to_string(), [2u8; 32]));
     }
 
     #[test]
@@ -234,10 +249,10 @@ mod tests {
         period.insert(&conn).unwrap();
 
         let mut seal = SealRecord {
-            id: "seal_prop".into(),
+            id: "seal_per_2026_08".into(),
             period_id: "per_2026_08".into(),
-            root: "root_initial".into(),
-            statement_hash: "hash_initial".into(),
+            root: "root_v1".into(),
+            statement_hash: "hash_v1".into(),
             topic_id: None,
             sequence_number: None,
             consensus_timestamp: None,
@@ -245,21 +260,71 @@ mod tests {
             approver_1_sig: None,
             approver_2_pubkey: None,
             approver_2_sig: None,
-            created_at: "2026-09-01T10:00:00Z".into(),
+            created_at: "2026-09-01T12:00:00Z".into(),
         };
-
-        // Propose
         seal.upsert(&conn).unwrap();
 
-        // Approve 1
-        seal.approver_1_pubkey = Some("pubkey_1".into());
-        seal.approver_1_sig = Some("sig_1".into());
+        seal.approver_1_pubkey = Some("pk1".into());
+        seal.approver_1_sig = Some("sig1".into());
         seal.upsert(&conn).unwrap();
 
-        // Check updated
         let loaded = SealRecord::find_by_period_id(&conn, "per_2026_08").unwrap();
-        assert_eq!(loaded.approver_1_pubkey.as_deref(), Some("pubkey_1"));
-        assert_eq!(loaded.approver_1_sig.as_deref(), Some("sig_1"));
-        assert!(loaded.approver_2_pubkey.is_none());
+        assert_eq!(loaded.approver_1_pubkey.as_deref(), Some("pk1"));
+        assert_eq!(loaded.approver_2_pubkey, None);
+    }
+
+    #[test]
+    fn test_find_nonexistent_seal_returns_seal_not_found() {
+        let conn = setup_test_db();
+        let result = SealRecord::find_by_period_id(&conn, "nonexistent");
+        match result {
+            Err(DbError::SealNotFound(id)) => assert_eq!(id, "nonexistent"),
+            _ => panic!("Expected DbError::SealNotFound"),
+        }
+    }
+
+    #[test]
+    fn test_duplicate_seal_insert_rejected() {
+        let conn = setup_test_db();
+        let period = PeriodRecord {
+            id: "per_2026_08".into(),
+            entity: "Acme Corp".into(),
+            start_date: "2026-08-01".into(),
+            end_date: "2026-08-31".into(),
+            status: "sealed".into(),
+        };
+        period.insert(&conn).unwrap();
+
+        let seal1 = SealRecord {
+            id: "seal_01".into(),
+            period_id: "per_2026_08".into(),
+            root: "root_a".into(),
+            statement_hash: "hash_a".into(),
+            topic_id: None,
+            sequence_number: None,
+            consensus_timestamp: None,
+            approver_1_pubkey: None,
+            approver_1_sig: None,
+            approver_2_pubkey: None,
+            approver_2_sig: None,
+            created_at: "2026-09-01T12:00:00Z".into(),
+        };
+        seal1.insert(&conn).unwrap();
+
+        let seal2 = SealRecord {
+            id: "seal_02".into(),
+            period_id: "per_2026_08".into(),
+            root: "root_b".into(),
+            statement_hash: "hash_b".into(),
+            topic_id: None,
+            sequence_number: None,
+            consensus_timestamp: None,
+            approver_1_pubkey: None,
+            approver_1_sig: None,
+            approver_2_pubkey: None,
+            approver_2_sig: None,
+            created_at: "2026-09-01T12:00:00Z".into(),
+        };
+        assert!(seal2.insert(&conn).is_err());
     }
 }

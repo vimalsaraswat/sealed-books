@@ -30,13 +30,14 @@ pub fn derive_eth_address(vk: &VerifyingKey) -> String {
     format!("0x{}", hex::encode(&address_hash[12..32]))
 }
 
-/// Verifies a signature against a prehash and recovers the 33-byte public key and Ethereum address.
+/// Verifies a 64-byte signature and recovers the signer's compressed public key and Ethereum address.
 pub fn verify_and_recover(
     prehash: &[u8],
     sig_64: &[u8],
     v_byte: u8,
 ) -> Result<RecoveredKeyInfo, String> {
-    let signature = Signature::from_slice(sig_64).map_err(|e| format!("Invalid signature: {e}"))?;
+    let signature =
+        Signature::from_slice(sig_64).map_err(|e| format!("Invalid 64-byte signature: {e}"))?;
 
     // Normalize recovery ID (27/28 -> 0/1)
     let rec_id_num = if v_byte >= 27 { v_byte - 27 } else { v_byte };
@@ -64,12 +65,13 @@ pub fn verify_and_recover(
     })
 }
 
-/// Verifies a signature against an explicitly provided 33-byte compressed public key.
+/// Verifies a signature (64-byte or 65-byte) against an explicitly provided 33-byte compressed public key.
 pub fn verify_with_pubkey(
     prehash: &[u8],
-    sig_64: &[u8],
+    sig_bytes: &[u8],
     pubkey_bytes: &[u8],
 ) -> Result<(), String> {
+    let (sig_64, _) = split_signature(sig_bytes)?;
     let signature = Signature::from_slice(sig_64).map_err(|e| format!("Invalid signature: {e}"))?;
     let vk = VerifyingKey::from_sec1_bytes(pubkey_bytes)
         .map_err(|e| format!("Invalid sec1 public key bytes: {e}"))?;
@@ -111,6 +113,8 @@ mod tests {
         );
 
         let compressed = verifying_key.to_encoded_point(true);
-        verify_with_pubkey(&prehash, sig_64, compressed.as_bytes()).expect("verify with pubkey");
+        verify_with_pubkey(&prehash, sig_64, compressed.as_bytes()).expect("verify with pubkey 64");
+        verify_with_pubkey(&prehash, &sig_65, compressed.as_bytes())
+            .expect("verify with pubkey 65");
     }
 }
