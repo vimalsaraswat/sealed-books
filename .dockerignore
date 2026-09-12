@@ -1,0 +1,14 @@
+target/
+.git/
+.env
+.env.*
+node_modules/
+dist/
+build/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+apps/desktop/
+packages/ui/
+apps/web/

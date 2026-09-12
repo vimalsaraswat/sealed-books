@@ -15,7 +15,7 @@ import type {
   Organization,
 } from "@sealed-books/ui";
 
-const API_BASE = "";
+const API_BASE = import.meta.env.VITE_API_URL || "";
 let currentSessionToken: string =
   localStorage.getItem("sealed_books_token") || "";
 
