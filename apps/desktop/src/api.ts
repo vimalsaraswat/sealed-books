@@ -1,4 +1,5 @@
 import type {
+  ApiClient,
   Account,
   Period,
   Entry,
@@ -15,16 +16,39 @@ import type {
   Organization,
 } from "@sealed-books/ui";
 
-const API_BASE = "";
+const DEFAULT_API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined) || "";
+
+export function getApiBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    return localStorage.getItem("sealed_books_api_url") || DEFAULT_API_BASE;
+  }
+  return DEFAULT_API_BASE;
+}
+
+export function setApiBaseUrl(url: string) {
+  if (typeof window !== "undefined") {
+    if (url) {
+      localStorage.setItem("sealed_books_api_url", url);
+    } else {
+      localStorage.removeItem("sealed_books_api_url");
+    }
+  }
+}
+
 let currentSessionToken: string =
-  localStorage.getItem("sealed_books_token") || "";
+  typeof window !== "undefined"
+    ? localStorage.getItem("sealed_books_token") || ""
+    : "";
 
 export function setSessionToken(token: string) {
   currentSessionToken = token;
-  if (token) {
-    localStorage.setItem("sealed_books_token", token);
-  } else {
-    localStorage.removeItem("sealed_books_token");
+  if (typeof window !== "undefined") {
+    if (token) {
+      localStorage.setItem("sealed_books_token", token);
+    } else {
+      localStorage.removeItem("sealed_books_token");
+    }
   }
 }
 
@@ -41,7 +65,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...(options?.headers as Record<string, string>),
   };
 
-  const res = await fetch(`${API_BASE}${path}`, {
+  const baseUrl = getApiBaseUrl().replace(/\/+$/, "");
+  const targetUrl = `${baseUrl}${path}`;
+
+  const res = await fetch(targetUrl, {
     ...options,
     headers,
   });
@@ -60,20 +87,30 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export const api = {
+export const api: ApiClient = {
   // Authentication & Tenancy
   async getMe(): Promise<LoginResponse> {
     return request<LoginResponse>("/api/auth/me");
   },
 
-  async sendOtp(email: string): Promise<{ status: string; email: string; is_new_user: boolean }> {
-    return request<{ status: string; email: string; is_new_user: boolean }>("/api/auth/otp/send", {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    });
+  async sendOtp(
+    email: string,
+  ): Promise<{ status: string; email: string; is_new_user: boolean }> {
+    return request<{ status: string; email: string; is_new_user: boolean }>(
+      "/api/auth/otp/send",
+      {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      },
+    );
   },
 
-  async verifyOtp(payload: { email: string; code: string; name?: string; organization_name?: string }): Promise<LoginResponse> {
+  async verifyOtp(payload: {
+    email: string;
+    code: string;
+    name?: string;
+    organization_name?: string;
+  }): Promise<LoginResponse> {
     const res = await request<LoginResponse>("/api/auth/otp/verify", {
       method: "POST",
       body: JSON.stringify(payload),

@@ -7,6 +7,8 @@
     "dev:web": "pnpm --filter @sealed-books/web dev",
     "dev:desktop": "pnpm --filter @sealed-books/desktop tauri dev",
     "build:web": "pnpm --filter @sealed-books/web build",
+    "build:desktop": "pnpm --filter @sealed-books/desktop build",
+    "build": "pnpm build:web && pnpm build:desktop",
     "build:rust": "cargo build --workspace",
     "test:rust": "cargo test --workspace",
     "check:rust": "cargo check --workspace",

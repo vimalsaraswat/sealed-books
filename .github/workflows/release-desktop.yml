@@ -1,0 +1,100 @@
+name: "Release Desktop App"
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest" # Apple Silicon (M1/M2/M3/M4)
+            args: "--target aarch64-apple-darwin"
+
+          - platform: "macos-13" # Intel Macs (Native x86_64)
+            args: "--target x86_64-apple-darwin"
+
+          - platform: "ubuntu-22.04" # Linux x64 (.deb & .AppImage)
+            args: ""
+
+          - platform: "windows-latest" # Windows x64 (.msi & .exe)
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            build-essential \
+            curl \
+            wget \
+            file
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: "pnpm"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and Publish Tauri Desktop App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: "apps/desktop"
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v__VERSION__' }}
+          releaseName: "Sealed Books ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v__VERSION__' }}"
+          releaseBody: |
+            ### Sealed Books Desktop Release
+
+            Native tamper-evident cryptographic accounting desktop client.
+
+            #### Download Packages:
+            - **Windows**: `.exe` (NSIS installer) or `.msi`
+            - **macOS (Apple Silicon M1/M2/M3/M4)**: `..._aarch64.dmg`
+            - **macOS (Intel)**: `..._x64.dmg`
+            - **Linux**: `.AppImage` (standalone portable) or `.deb` (Debian/Ubuntu)
+
+            #### First-Time Opening Notes:
+            - **Windows**: If Windows Defender SmartScreen appears, click **More info** $\rightarrow$ **Run anyway** (standard for open-source apps without a paid EV certificate).
+            - **macOS**: Drag `Sealed Books.app` into Applications. On first launch, **Right-click (Control-click)** the app and select **Open** $\rightarrow$ **Open** (bypasses Gatekeeper without a $99/yr Apple certificate).
+            - **Linux AppImage**: Make executable with `chmod +x <filename>.AppImage` then run.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
