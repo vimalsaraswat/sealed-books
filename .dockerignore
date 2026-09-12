@@ -12,3 +12,4 @@ build/
 apps/desktop/
 packages/ui/
 apps/web/
+tools/harness/

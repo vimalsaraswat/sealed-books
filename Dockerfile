@@ -1,5 +1,5 @@
 # ==============================================================================
-# Multi-Stage Dockerfile for Sealed Books Axum Server
+# Multi-Stage Dockerfile for Sealed Books Axum Server (Standalone)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -16,16 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Copy workspace manifests
-COPY Cargo.toml Cargo.lock ./
-COPY crates/core/Cargo.toml crates/core/
-COPY apps/server/Cargo.toml apps/server/
-COPY apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/
-COPY tools/harness/Cargo.toml tools/harness/
+# 2. Generate a clean workspace Cargo.toml with ONLY core and server (no desktop or harness)
+RUN printf '[workspace]\nresolver = "3"\nmembers = [\n    "crates/core",\n    "apps/server",\n]\n\n[workspace.package]\nversion = "0.1.0"\nedition = "2024"\nlicense = "MIT"\nauthors = ["Vimal Saraswat"]\n\n[workspace.dependencies]\nsealed-books-core = { path = "crates/core" }\nserde = { version = "1", features = ["derive"] }\nserde_json = "1"\n\n[profile.release]\ncodegen-units = 1\nlto = true\nopt-level = 3\npanic = "abort"\nstrip = true\n' > Cargo.toml
 
-# 3. Copy Rust sources needed for server build
-COPY crates/core/src crates/core/src
-COPY apps/server/src apps/server/src
+# 3. Copy Cargo.lock and the required server crates only
+COPY Cargo.lock ./
+COPY crates/core/ crates/core/
+COPY apps/server/ apps/server/
 
 # 4. Build optimized release binary
 RUN cargo build --release --bin sealed-books-server
