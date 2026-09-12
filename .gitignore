@@ -41,3 +41,5 @@ apps/desktop/src-tauri/gen/
 
 # Local files
 *.local
+.vercel
+.env*
