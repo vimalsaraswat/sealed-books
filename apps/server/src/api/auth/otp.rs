@@ -1,7 +1,7 @@
 //! OTP code generation, expiration, and database lifecycle management.
 
 use crate::api::error::ApiError;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use k256::elliptic_curve::rand_core::{OsRng, RngCore};
 use rusqlite::Connection;
 
@@ -25,7 +25,7 @@ pub fn store_otp(conn: &Connection, email: &str, code: &str) -> Result<(), ApiEr
     Ok(())
 }
 
-/// Verifies a submitted OTP code for an email address and consumes it if valid.
+/// Verifies a submitted OTP code for an email address and consumes it if valid and not expired.
 pub fn verify_and_consume_otp(
     conn: &Connection,
     email: &str,
@@ -37,10 +37,25 @@ pub fn verify_and_consume_otp(
         |row| Ok((row.get(0)?, row.get(1)?)),
     );
 
-    let is_valid = match stored {
-        Ok((code, _expires_at)) => code == submitted_code || submitted_code == "123456",
-        Err(_) => submitted_code == "123456", // Universal local testnet fallback
+    let (stored_code, expires_at_str) = match stored {
+        Ok(vals) => vals,
+        Err(_) => return Ok(false),
     };
+
+    // Check expiration against current time (collapsed per clippy::collapsible_if)
+    if let Ok(expires_at) = DateTime::parse_from_rfc3339(&expires_at_str)
+        && Utc::now() > expires_at.with_timezone(&Utc)
+    {
+        // Expired: prune record and reject
+        let _ = conn.execute(
+            "DELETE FROM auth_otps WHERE email = ?1;",
+            rusqlite::params![email],
+        );
+        return Ok(false);
+    }
+
+    // Exact match check only — no universal dev bypasses
+    let is_valid = stored_code == submitted_code;
 
     if is_valid {
         let _ = conn.execute(
