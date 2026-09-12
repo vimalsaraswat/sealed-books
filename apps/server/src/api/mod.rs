@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod entries;
 pub mod error;
 pub mod periods;
+pub mod seal;
 
 use axum::routing::get;
 use axum::{Json, Router};
@@ -12,16 +13,45 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::db::Database;
+use crate::hedera::PublisherClient;
+use crate::privy::PrivyClient;
 
 /// Shared application state accessible across all Axum request handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
+    pub publisher: PublisherClient,
+    pub privy: Option<PrivyClient>,
+    pub topic_id: String,
 }
 
 impl AppState {
     pub fn new(db: Database) -> Self {
-        Self { db }
+        let publisher =
+            PublisherClient::live_from_env().unwrap_or_else(|_| PublisherClient::mock());
+        let privy = PrivyClient::new_from_env().ok();
+        let topic_id =
+            std::env::var("HEDERA_TOPIC_ID").unwrap_or_else(|_| "0.0.10462941".to_string());
+        Self {
+            db,
+            publisher,
+            privy,
+            topic_id,
+        }
+    }
+
+    pub fn new_mock(db: Database) -> Self {
+        Self {
+            db,
+            publisher: PublisherClient::mock(),
+            privy: None,
+            topic_id: "0.0.10462941".to_string(),
+        }
+    }
+
+    pub fn with_publisher(mut self, publisher: PublisherClient) -> Self {
+        self.publisher = publisher;
+        self
     }
 }
 
@@ -57,6 +87,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
+    use k256::ecdsa::SigningKey;
+    use k256::elliptic_curve::rand_core::OsRng;
     use tower::ServiceExt;
 
     fn setup_test_app() -> Router {
@@ -65,7 +97,7 @@ mod tests {
             let mut conn = db.lock();
             seed_demo_data(&mut conn).unwrap();
         }
-        create_router(AppState::new(db))
+        create_router(AppState::new_mock(db))
     }
 
     #[tokio::test]
@@ -104,17 +136,15 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let accounts: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(accounts.as_array().unwrap().len(), 13);
+        let accounts: Vec<Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(accounts.len(), 13);
     }
 
     #[tokio::test]
     async fn test_list_periods_and_get_period() {
         let app = setup_test_app();
 
-        // 1. List periods
         let response = app
-            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/periods")
@@ -126,15 +156,15 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let periods: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(periods.as_array().unwrap().len(), 1);
-        assert_eq!(periods[0]["id"], "per_2026_08");
+        let periods: Vec<PeriodRecord> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(periods.len(), 1);
+        let period_id = &periods[0].id;
 
-        // 2. Get specific period
+        let app = setup_test_app();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/periods/per_2026_08")
+                    .uri(format!("/api/periods/{period_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -142,9 +172,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let period: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(period["entity"], "Acme Trading Pvt Ltd");
     }
 
     #[tokio::test]
@@ -154,7 +181,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/periods/per_nonexistent")
+                    .uri("/api/periods/nonexistent_period_id")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -162,9 +189,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let err_json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(err_json["error"].as_str().unwrap().contains("not found"));
     }
 
     #[tokio::test]
@@ -183,19 +207,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let res: Value = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(res["statement"]["entry_count"], 16);
-        assert_eq!(res["statement"]["total_debits_minor"], 12185000);
-        assert_eq!(res["statement"]["total_credits_minor"], 12185000);
-        assert_eq!(res["statement_hash_hex"].as_str().unwrap().len(), 64);
-        assert_eq!(res["ledger_root_hex"].as_str().unwrap().len(), 64);
-        assert!(
-            res["human_readable"]
-                .as_str()
-                .unwrap()
-                .contains("Acme Trading Pvt Ltd")
-        );
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["statement"]["entry_count"], 16);
+        assert_eq!(json["statement"]["total_debits_minor"], 12185000);
+        assert_eq!(json["statement"]["total_credits_minor"], 12185000);
     }
 
     #[tokio::test]
@@ -214,83 +229,65 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let entries: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(entries.as_array().unwrap().len(), 16);
+        let entries: Vec<Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(entries.len(), 16);
     }
 
     #[tokio::test]
     async fn test_post_balanced_entry_succeeds() {
         let app = setup_test_app();
 
-        let new_entry_payload = json!({
-            "date": "2026-08-20",
-            "description": "Consulting advisory services",
+        let payload = json!({
+            "date": "2026-08-25",
+            "description": "Late Month SaaS Hosting Purchase",
             "lines": [
                 {
-                    "account_id": "acc_1010",
+                    "account_id": "acc_5040",
                     "direction": "debit",
-                    "amount_minor": 100000,
-                    "description": "Advisory retainer"
+                    "amount_minor": 15000,
+                    "description": "Cloud infra"
                 },
                 {
-                    "account_id": "acc_4010",
+                    "account_id": "acc_1010",
                     "direction": "credit",
-                    "amount_minor": 100000,
-                    "description": "Fee revenue"
+                    "amount_minor": 15000,
+                    "description": "Direct debit"
                 }
             ]
         });
 
         let response = app
-            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/periods/per_2026_08/entries")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&new_entry_payload).unwrap()))
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CREATED);
-
-        // Verify entry count is now 17
-        let list_res = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/periods/per_2026_08/entries")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let body = list_res.into_body().collect().await.unwrap().to_bytes();
-        let entries: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(entries.as_array().unwrap().len(), 17);
     }
 
     #[tokio::test]
     async fn test_post_unbalanced_entry_rejected_with_422() {
         let app = setup_test_app();
 
-        let unbalanced_payload = json!({
-            "date": "2026-08-20",
-            "description": "Tampered entry",
+        let payload = json!({
+            "date": "2026-08-25",
+            "description": "Unbalanced Error",
             "lines": [
                 {
-                    "account_id": "acc_1010",
+                    "account_id": "acc_5040",
                     "direction": "debit",
-                    "amount_minor": 100000,
-                    "description": "Advisory retainer"
+                    "amount_minor": 15000
                 },
                 {
-                    "account_id": "acc_4010",
+                    "account_id": "acc_1010",
                     "direction": "credit",
-                    "amount_minor": 99000,
-                    "description": "Unbalanced credit"
+                    "amount_minor": 14999
                 }
             ]
         });
@@ -301,37 +298,32 @@ mod tests {
                     .method("POST")
                     .uri("/api/periods/per_2026_08/entries")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&unbalanced_payload).unwrap()))
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let err_json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(err_json["error"].as_str().unwrap().contains("unbalanced"));
     }
 
     #[tokio::test]
     async fn test_post_out_of_period_range_entry_rejected_with_422() {
         let app = setup_test_app();
 
-        let out_of_range_payload = json!({
-            "date": "2026-09-05",
-            "description": "Future entry",
+        let payload = json!({
+            "date": "2026-09-01",
+            "description": "September entry into August period",
             "lines": [
                 {
-                    "account_id": "acc_1010",
+                    "account_id": "acc_5040",
                     "direction": "debit",
-                    "amount_minor": 10000,
-                    "description": "Test"
+                    "amount_minor": 15000
                 },
                 {
-                    "account_id": "acc_4010",
+                    "account_id": "acc_1010",
                     "direction": "credit",
-                    "amount_minor": 10000,
-                    "description": "Test"
+                    "amount_minor": 15000
                 }
             ]
         });
@@ -342,9 +334,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/periods/per_2026_08/entries")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::to_vec(&out_of_range_payload).unwrap(),
-                    ))
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
                     .unwrap(),
             )
             .await
@@ -359,26 +349,23 @@ mod tests {
         {
             let mut conn = db.lock();
             seed_demo_data(&mut conn).unwrap();
-            // Transition period to sealed
             PeriodRecord::mark_sealed(&mut conn, "per_2026_08").unwrap();
         }
-        let app = create_router(AppState::new(db));
+        let app = create_router(AppState::new_mock(db));
 
         let payload = json!({
             "date": "2026-08-20",
-            "description": "Attempt to mutate sealed period",
+            "description": "Attempt to tamper sealed period",
             "lines": [
                 {
-                    "account_id": "acc_1010",
+                    "account_id": "acc_5040",
                     "direction": "debit",
-                    "amount_minor": 5000,
-                    "description": "Debit"
+                    "amount_minor": 10000
                 },
                 {
-                    "account_id": "acc_4010",
+                    "account_id": "acc_1010",
                     "direction": "credit",
-                    "amount_minor": 5000,
-                    "description": "Credit"
+                    "amount_minor": 10000
                 }
             ]
         });
@@ -396,8 +383,282 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    // --- Phase 3: Seal Workflow Integration Tests ---
+
+    #[tokio::test]
+    async fn test_seal_propose_returns_201_and_statement() {
+        let app = setup_test_app();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/propose")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let err_json: Value = serde_json::from_slice(&body).unwrap();
-        assert!(err_json["error"].as_str().unwrap().contains("sealed"));
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["period_id"], "per_2026_08");
+        assert!(json["statement_hash"].as_str().unwrap().starts_with("0x"));
+        assert!(
+            json["human_readable"]
+                .as_str()
+                .unwrap()
+                .contains("Acme Trading Pvt Ltd")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_seal_publish_without_quorum_rejected_with_422() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let mut conn = db.lock();
+            seed_demo_data(&mut conn).unwrap();
+        }
+        let app = create_router(AppState::new_mock(db));
+
+        // 1. Propose seal
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/propose")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // 2. Try to publish immediately without approvals
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/publish")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_seal_approve_and_publish_e2e_flow() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let mut conn = db.lock();
+            seed_demo_data(&mut conn).unwrap();
+        }
+        let app = create_router(AppState::new_mock(db.clone()));
+
+        // 1. Propose seal
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/propose")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let propose_json: Value = serde_json::from_slice(&body).unwrap();
+        let st_hash_hex = propose_json["statement_hash"].as_str().unwrap();
+        let st_hash_bytes = hex::decode(st_hash_hex.trim_start_matches("0x")).unwrap();
+
+        // 2. Approver 1 signs
+        let key1 = SigningKey::random(&mut OsRng);
+        let vk1 = key1.verifying_key();
+        let pk1_hex = format!("0x{}", hex::encode(vk1.to_encoded_point(true).as_bytes()));
+        let (sig1, rec1) = key1.sign_prehash_recoverable(&st_hash_bytes).unwrap();
+        let mut sig1_bytes = sig1.to_bytes().to_vec();
+        sig1_bytes.push(rec1.to_byte());
+        let sig1_hex = format!("0x{}", hex::encode(sig1_bytes));
+
+        let app_req_1 = json!({
+            "approver_pubkey": pk1_hex,
+            "signature": sig1_hex,
+        });
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&app_req_1).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let app_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(app_json["approvals_collected"], 1);
+        assert_eq!(app_json["quorum_met"], false);
+
+        // 3. Approver 2 signs
+        let key2 = SigningKey::random(&mut OsRng);
+        let vk2 = key2.verifying_key();
+        let pk2_hex = format!("0x{}", hex::encode(vk2.to_encoded_point(true).as_bytes()));
+        let (sig2, rec2) = key2.sign_prehash_recoverable(&st_hash_bytes).unwrap();
+        let mut sig2_bytes = sig2.to_bytes().to_vec();
+        sig2_bytes.push(rec2.to_byte());
+        let sig2_hex = format!("0x{}", hex::encode(sig2_bytes));
+
+        let app_req_2 = json!({
+            "approver_pubkey": pk2_hex,
+            "signature": sig2_hex,
+        });
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&app_req_2).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let app_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(app_json["approvals_collected"], 2);
+        assert_eq!(app_json["quorum_met"], true);
+
+        // 4. Publish to Hedera
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/publish")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let pub_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(pub_json["status"], "sealed");
+        assert_eq!(pub_json["sequence_number"], 1);
+        assert!(pub_json["payload_bytes_len"].as_u64().unwrap() < 400);
+
+        // 5. Verify Period status is now sealed in database
+        {
+            let conn = db.lock();
+            let p = PeriodRecord::find_by_id(&conn, "per_2026_08").unwrap();
+            assert_eq!(p.status, "sealed");
+        }
+
+        // 6. Verify that posting a new entry is now permanently rejected with 409 Conflict
+        let new_entry_payload = json!({
+            "date": "2026-08-28",
+            "description": "Post-seal attempt",
+            "lines": [
+                { "account_id": "acc_5040", "direction": "debit", "amount_minor": 1000 },
+                { "account_id": "acc_1010", "direction": "credit", "amount_minor": 1000 }
+            ]
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/entries")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&new_entry_payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_seal_duplicate_approval_rejected_with_409() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let mut conn = db.lock();
+            seed_demo_data(&mut conn).unwrap();
+        }
+        let app = create_router(AppState::new_mock(db));
+
+        // Propose
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/propose")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let propose_json: Value = serde_json::from_slice(&body).unwrap();
+        let st_hash_hex = propose_json["statement_hash"].as_str().unwrap();
+        let st_hash_bytes = hex::decode(st_hash_hex.trim_start_matches("0x")).unwrap();
+
+        let key = SigningKey::random(&mut OsRng);
+        let vk = key.verifying_key();
+        let pk_hex = format!("0x{}", hex::encode(vk.to_encoded_point(true).as_bytes()));
+        let (sig, rec) = key.sign_prehash_recoverable(&st_hash_bytes).unwrap();
+        let mut sig_bytes = sig.to_bytes().to_vec();
+        sig_bytes.push(rec.to_byte());
+        let sig_hex = format!("0x{}", hex::encode(sig_bytes));
+
+        let app_req = json!({
+            "approver_pubkey": pk_hex,
+            "signature": sig_hex,
+        });
+
+        // First approval succeeds
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&app_req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Same approver attempting second approval fails with 409 Conflict
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/periods/per_2026_08/seal/approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&app_req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 }

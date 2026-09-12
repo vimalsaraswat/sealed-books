@@ -29,6 +29,12 @@ Thumbs.db
 # Logs
 *.log
 
+# SQLite databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
 # Tauri
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/

@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::api::AppState;
 use crate::api::entries;
 use crate::api::error::ApiError;
+use crate::api::seal;
 use crate::db::repository::entry::EntryExt;
 use crate::db::repository::period::PeriodRecord;
 use sealed_books_core::hash::statement_hash;
@@ -21,6 +22,7 @@ pub fn router() -> Router<AppState> {
         .route("/:id", get(get_period))
         .route("/:id/statement", get(get_period_statement))
         .nest("/:id/entries", entries::router())
+        .nest("/:id/seal", seal::router())
 }
 
 /// Response containing the deterministic period close statement and calculated hashes.
@@ -51,26 +53,22 @@ pub async fn get_period(
     Ok(Json(period))
 }
 
-/// Generates the deterministic close statement and Merkle root for a period.
+/// Computes the cryptographic seal statement and Merkle root for an accounting period.
 pub async fn get_period_statement(
     State(state): State<AppState>,
     Path(period_id): Path<String>,
 ) -> Result<Json<StatementResponse>, ApiError> {
     let conn = state.db.lock();
+    let period = PeriodRecord::find_by_id(&conn, &period_id)?;
+    let entries = Entry::find_by_period(&conn, &period_id)?;
 
-    // 1. Fetch period record and map to core domain
-    let period_record = PeriodRecord::find_by_id(&conn, &period_id)?;
-    let core_period = period_record.to_core();
-
-    // 2. Fetch all entries for this period
-    let entries = <Entry as EntryExt>::find_by_period(&conn, &period_id)?;
-
-    // 3. Build canonical statement and Merkle tree root using crates/core
+    let core_period = period.to_core();
     let statement = build_statement(&core_period, &entries)?;
-    let hash = statement_hash(&statement);
+    let statement_hash_bytes = statement_hash(&statement);
+
+    let statement_hash_hex = format!("0x{}", hex::encode(statement_hash_bytes));
+    let ledger_root_hex = format!("0x{}", hex::encode(statement.ledger_root));
     let human_readable = statement.to_human_readable();
-    let ledger_root_hex = hex::encode(statement.ledger_root);
-    let statement_hash_hex = hex::encode(hash);
 
     Ok(Json(StatementResponse {
         statement,
