@@ -188,7 +188,6 @@ pub async fn post_send_otp(
         status: "sent".into(),
         email,
         is_new_user,
-        dev_code: Some(code),
     }))
 }
 

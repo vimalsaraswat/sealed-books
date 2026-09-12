@@ -200,8 +200,11 @@ pub async fn verify_period(
     };
 
     let human_readable_statement = payload.statement.to_human_readable();
-    let hashscan_url =
-        format!("https://hashscan.io/testnet/topic/{topic_id}/message/{sequence_number}");
+    let hashscan_url = if !consensus_timestamp.is_empty() {
+        format!("https://hashscan.io/testnet/transaction/{consensus_timestamp}")
+    } else {
+        format!("https://hashscan.io/testnet/topic/{topic_id}")
+    };
 
     // 7. Verify integrity against on-chain statement
     if !signatures_intact {

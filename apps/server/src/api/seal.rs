@@ -458,10 +458,11 @@ async fn publish_seal(
         PeriodRecord::mark_sealed(&conn, &period_id)?;
     }
 
-    let hashscan_url = format!(
-        "https://hashscan.io/testnet/topic/{}/message/{}",
-        receipt.topic_id, receipt.sequence_number
-    );
+    let hashscan_url = if !receipt.consensus_timestamp.is_empty() {
+        format!("https://hashscan.io/testnet/transaction/{}", receipt.consensus_timestamp)
+    } else {
+        format!("https://hashscan.io/testnet/topic/{}", receipt.topic_id)
+    };
 
     Ok(Json(PublishResponse {
         status: "published".into(),

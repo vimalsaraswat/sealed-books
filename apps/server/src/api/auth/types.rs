@@ -59,8 +59,6 @@ pub struct SendOtpResponse {
     pub status: String,
     pub email: String,
     pub is_new_user: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dev_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
