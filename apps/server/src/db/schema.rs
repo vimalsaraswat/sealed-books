@@ -6,17 +6,65 @@ use rusqlite::Connection;
 pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "
-        -- Chart of accounts
-        CREATE TABLE IF NOT EXISTS accounts (
+        -- Organizations (Tenant isolation boundary)
+        CREATE TABLE IF NOT EXISTS organizations (
             id TEXT PRIMARY KEY,
-            code TEXT NOT NULL UNIQUE,
             name TEXT NOT NULL,
-            account_type TEXT NOT NULL CHECK(account_type IN ('asset', 'liability', 'equity', 'revenue', 'expense'))
+            base_currency TEXT NOT NULL DEFAULT 'USD',
+            created_at TEXT NOT NULL
         );
 
-        -- Accounting periods
+        -- Global Users (1 identity across organizations)
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            pubkey TEXT NOT NULL,
+            eth_address TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        -- Organization Memberships (User role within an organization)
+        CREATE TABLE IF NOT EXISTS organization_memberships (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'controller', 'auditor', 'staff')),
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'invited', 'suspended')),
+            created_at TEXT NOT NULL,
+            UNIQUE(organization_id, user_id)
+        );
+
+        -- User Sessions (Bearer token auth)
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            active_organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+            expires_at TEXT NOT NULL
+        );
+
+        -- Authentication OTPs (Passwordless Email + OTP)
+        CREATE TABLE IF NOT EXISTS auth_otps (
+            email TEXT PRIMARY KEY,
+            code TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        -- Chart of accounts (Scoped to organization)
+        CREATE TABLE IF NOT EXISTS accounts (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL DEFAULT 'org_acme' REFERENCES organizations(id),
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            account_type TEXT NOT NULL CHECK(account_type IN ('asset', 'liability', 'equity', 'revenue', 'expense')),
+            UNIQUE(organization_id, code)
+        );
+
+        -- Accounting periods (Scoped to organization)
         CREATE TABLE IF NOT EXISTS periods (
             id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL DEFAULT 'org_acme' REFERENCES organizations(id),
             entity TEXT NOT NULL,
             start_date TEXT NOT NULL,
             end_date TEXT NOT NULL,
@@ -55,6 +103,9 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
             approver_1_sig TEXT,
             approver_2_pubkey TEXT,
             approver_2_sig TEXT,
+            dispatch_status TEXT NOT NULL DEFAULT 'draft' CHECK(dispatch_status IN ('draft', 'pending_auditor', 'sealed', 'rejected')),
+            auditor_id TEXT REFERENCES users(id),
+            auditor_notes TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -65,8 +116,33 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
             leaf_hash TEXT NOT NULL,
             PRIMARY KEY (period_id, entry_id)
         );
+        ",
+    )?;
 
-        -- Indexes for fast query performance
+    // Safe backwards-compatible column migrations for existing local database files
+    let _ = conn.execute(
+        "ALTER TABLE accounts ADD COLUMN organization_id TEXT DEFAULT 'org_acme';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE periods ADD COLUMN organization_id TEXT DEFAULT 'org_acme';",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE seals ADD COLUMN dispatch_status TEXT DEFAULT 'draft';",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE seals ADD COLUMN auditor_id TEXT;", []);
+    let _ = conn.execute("ALTER TABLE seals ADD COLUMN auditor_notes TEXT;", []);
+
+    // Apply indexes after table definitions and column migrations
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_memberships_user ON organization_memberships(user_id);
+        CREATE INDEX IF NOT EXISTS idx_memberships_org ON organization_memberships(organization_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
+        CREATE INDEX IF NOT EXISTS idx_accounts_org ON accounts(organization_id);
+        CREATE INDEX IF NOT EXISTS idx_periods_org ON periods(organization_id);
         CREATE INDEX IF NOT EXISTS idx_entries_period_id ON entries(period_id);
         CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(date);
         CREATE INDEX IF NOT EXISTS idx_lines_entry_id ON lines(entry_id);
@@ -100,6 +176,10 @@ mod tests {
             rows
         };
 
+        assert!(tables.contains(&"organizations".to_string()));
+        assert!(tables.contains(&"users".to_string()));
+        assert!(tables.contains(&"organization_memberships".to_string()));
+        assert!(tables.contains(&"sessions".to_string()));
         assert!(tables.contains(&"accounts".to_string()));
         assert!(tables.contains(&"periods".to_string()));
         assert!(tables.contains(&"entries".to_string()));

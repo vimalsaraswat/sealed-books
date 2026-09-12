@@ -27,4 +27,7 @@ pub enum DbError {
 
     #[error("Seal for period '{0}' already exists")]
     SealAlreadyExists(String),
+
+    #[error("Entity not found: {0}")]
+    EntityNotFound(String),
 }
