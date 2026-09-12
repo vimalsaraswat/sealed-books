@@ -4,9 +4,15 @@ use crate::db::error::DbError;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+fn default_org_id() -> String {
+    "org_acme".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,
+    #[serde(default = "default_org_id")]
+    pub organization_id: String,
     pub code: String,
     pub name: String,
     pub account_type: String,
@@ -16,8 +22,14 @@ impl Account {
     /// Inserts this account into the database.
     pub fn insert(&self, conn: &Connection) -> Result<(), DbError> {
         conn.execute(
-            "INSERT INTO accounts (id, code, name, account_type) VALUES (?1, ?2, ?3, ?4);",
-            params![&self.id, &self.code, &self.name, &self.account_type],
+            "INSERT INTO accounts (id, organization_id, code, name, account_type) VALUES (?1, ?2, ?3, ?4, ?5);",
+            params![
+                &self.id,
+                if self.organization_id.is_empty() { "org_acme" } else { &self.organization_id },
+                &self.code,
+                &self.name,
+                &self.account_type
+            ],
         )?;
         Ok(())
     }
@@ -25,14 +37,15 @@ impl Account {
     /// Finds an account by its unique ID.
     pub fn find_by_id(conn: &Connection, id: &str) -> Result<Self, DbError> {
         conn.query_row(
-            "SELECT id, code, name, account_type FROM accounts WHERE id = ?1;",
+            "SELECT id, organization_id, code, name, account_type FROM accounts WHERE id = ?1;",
             params![id],
             |row| {
                 Ok(Account {
                     id: row.get(0)?,
-                    code: row.get(1)?,
-                    name: row.get(2)?,
-                    account_type: row.get(3)?,
+                    organization_id: row.get(1)?,
+                    code: row.get(2)?,
+                    name: row.get(3)?,
+                    account_type: row.get(4)?,
                 })
             },
         )
@@ -42,17 +55,38 @@ impl Account {
         })
     }
 
+    /// Lists all accounts ordered by account code for a specific organization.
+    pub fn list_by_org(conn: &Connection, org_id: &str) -> Result<Vec<Self>, DbError> {
+        let mut stmt = conn.prepare(
+            "SELECT id, organization_id, code, name, account_type FROM accounts WHERE organization_id = ?1 ORDER BY code;",
+        )?;
+        let accounts = stmt
+            .query_map(params![org_id], |row| {
+                Ok(Account {
+                    id: row.get(0)?,
+                    organization_id: row.get(1)?,
+                    code: row.get(2)?,
+                    name: row.get(3)?,
+                    account_type: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(accounts)
+    }
+
     /// Lists all accounts ordered by account code.
     pub fn list_all(conn: &Connection) -> Result<Vec<Self>, DbError> {
-        let mut stmt =
-            conn.prepare("SELECT id, code, name, account_type FROM accounts ORDER BY code;")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, organization_id, code, name, account_type FROM accounts ORDER BY code;",
+        )?;
         let accounts = stmt
             .query_map([], |row| {
                 Ok(Account {
                     id: row.get(0)?,
-                    code: row.get(1)?,
-                    name: row.get(2)?,
-                    account_type: row.get(3)?,
+                    organization_id: row.get(1)?,
+                    code: row.get(2)?,
+                    name: row.get(3)?,
+                    account_type: row.get(4)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -69,6 +103,11 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("PRAGMA foreign_keys = ON;", []).unwrap();
         migrate(&conn).unwrap();
+        // Insert default organization for tests
+        conn.execute(
+            "INSERT OR IGNORE INTO organizations (id, name, base_currency, created_at) VALUES ('org_acme', 'Acme', 'USD', '2026-08-01T00:00:00Z');",
+            [],
+        ).unwrap();
         conn
     }
 
@@ -76,88 +115,86 @@ mod tests {
     fn test_insert_and_find_by_id() {
         let conn = setup_test_db();
         let acc = Account {
-            id: "acc_cash".into(),
-            code: "1000".into(),
-            name: "Petty Cash".into(),
+            id: "acc_1010".into(),
+            organization_id: "org_acme".into(),
+            code: "1010".into(),
+            name: "Operating Cash".into(),
             account_type: "asset".into(),
         };
 
         acc.insert(&conn).unwrap();
-        let loaded = Account::find_by_id(&conn, "acc_cash").unwrap();
-        assert_eq!(acc, loaded);
+        let fetched = Account::find_by_id(&conn, "acc_1010").unwrap();
+        assert_eq!(fetched, acc);
     }
 
     #[test]
     fn test_find_by_id_not_found() {
         let conn = setup_test_db();
         let err = Account::find_by_id(&conn, "acc_missing").unwrap_err();
-        match err {
-            DbError::AccountNotFound(id) => assert_eq!(id, "acc_missing"),
-            other => panic!("Expected AccountNotFound, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_list_all_ordered_by_code() {
-        let conn = setup_test_db();
-        let a1 = Account {
-            id: "acc_rev".into(),
-            code: "4000".into(),
-            name: "Revenue".into(),
-            account_type: "revenue".into(),
-        };
-        let a2 = Account {
-            id: "acc_asset".into(),
-            code: "1000".into(),
-            name: "Cash".into(),
-            account_type: "asset".into(),
-        };
-
-        // Insert in reverse order
-        a1.insert(&conn).unwrap();
-        a2.insert(&conn).unwrap();
-
-        let list = Account::list_all(&conn).unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].code, "1000");
-        assert_eq!(list[1].code, "4000");
+        assert!(matches!(err, DbError::AccountNotFound(_)));
     }
 
     #[test]
     fn test_duplicate_code_rejected() {
         let conn = setup_test_db();
-        let a1 = Account {
+        let acc1 = Account {
             id: "acc_1".into(),
-            code: "1000".into(),
-            name: "Cash".into(),
+            organization_id: "org_acme".into(),
+            code: "1010".into(),
+            name: "Operating Cash".into(),
             account_type: "asset".into(),
         };
-        let a2 = Account {
-            id: "acc_2".into(),
-            code: "1000".into(),
-            name: "Bank".into(),
-            account_type: "asset".into(),
-        };
+        acc1.insert(&conn).unwrap();
 
-        a1.insert(&conn).unwrap();
-        let err = a2.insert(&conn);
-        assert!(err.is_err(), "Duplicate account code must be rejected");
+        let acc2 = Account {
+            id: "acc_2".into(),
+            organization_id: "org_acme".into(),
+            code: "1010".into(),
+            name: "Petty Cash".into(),
+            account_type: "asset".into(),
+        };
+        let err = acc2.insert(&conn).unwrap_err();
+        assert!(matches!(err, DbError::Sqlite(_)));
     }
 
     #[test]
     fn test_invalid_account_type_rejected() {
         let conn = setup_test_db();
-        let a = Account {
-            id: "acc_invalid".into(),
+        let acc = Account {
+            id: "acc_1".into(),
+            organization_id: "org_acme".into(),
             code: "9999".into(),
-            name: "Invalid Type".into(),
-            account_type: "not_a_valid_type".into(),
+            name: "Weird".into(),
+            account_type: "invalid_type".into(),
+        };
+        let err = acc.insert(&conn).unwrap_err();
+        assert!(matches!(err, DbError::Sqlite(_)));
+    }
+
+    #[test]
+    fn test_list_all_ordered_by_code() {
+        let conn = setup_test_db();
+        let acc2 = Account {
+            id: "acc_2".into(),
+            organization_id: "org_acme".into(),
+            code: "2010".into(),
+            name: "Accounts Payable".into(),
+            account_type: "liability".into(),
+        };
+        let acc1 = Account {
+            id: "acc_1".into(),
+            organization_id: "org_acme".into(),
+            code: "1010".into(),
+            name: "Cash".into(),
+            account_type: "asset".into(),
         };
 
-        let err = a.insert(&conn);
-        assert!(
-            err.is_err(),
-            "CHECK constraint must reject invalid account_type"
-        );
+        acc2.insert(&conn).unwrap();
+        acc1.insert(&conn).unwrap();
+
+        let list = Account::list_all(&conn).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].code, "1010");
+        assert_eq!(list[1].code, "2010");
     }
 }

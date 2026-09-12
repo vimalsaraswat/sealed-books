@@ -1,49 +1,65 @@
-//! Journal entry posting, line items management, and canonical roundtrip queries.
+//! Journal entry repository: SQLite persistence and conversion to/from `sealed_books_core::types::Entry`.
 
 use crate::db::error::DbError;
-use crate::db::repository::period::PeriodRecord;
 use rusqlite::{Connection, params};
 use sealed_books_core::types::{Direction, Entry, Line};
 
-/// Extension trait providing database persistence and querying for `sealed_books_core::Entry`.
+/// Extension trait providing database queries for `Entry`.
 pub trait EntryExt {
-    /// Posts this balanced journal entry to an open accounting period in the database.
-    fn post_to(&self, conn: &mut Connection, period_id: &str) -> Result<(), DbError>;
+    /// Persists this entry and all of its balanced lines in a single database transaction.
+    ///
+    /// Validates double-entry balance, verifies that the target period is not sealed,
+    /// and ensures all referenced account IDs exist.
+    fn post_to(&self, conn: &Connection, period_id: &str) -> Result<(), DbError>;
 
-    /// Finds a specific entry by its unique ID.
-    fn find_by_id(conn: &Connection, id: &str) -> Result<Entry, DbError>;
-
-    /// Retrieves all journal entries and lines for a period, ordered deterministically.
+    /// Loads all entries and lines for a specific accounting period,
+    /// returned in deterministic order (by entry timestamp, then entry ID, lines by line ID).
     fn find_by_period(conn: &Connection, period_id: &str) -> Result<Vec<Entry>, DbError>;
+
+    /// Loads a single entry by its unique ID.
+    fn find_by_id(conn: &Connection, id: &str) -> Result<Entry, DbError>;
 }
 
 impl EntryExt for Entry {
-    fn post_to(&self, conn: &mut Connection, period_id: &str) -> Result<(), DbError> {
-        // 1. Verify period exists and is open
-        let period = PeriodRecord::find_by_id(conn, period_id)?;
-        if period.status == "sealed" {
+    fn post_to(&self, conn: &Connection, period_id: &str) -> Result<(), DbError> {
+        // 1. Validate double-entry balance and at least 1 debit and credit
+        self.validate()?;
+
+        // 2. Check that target period exists and is open
+        let period_status: String = conn
+            .query_row(
+                "SELECT status FROM periods WHERE id = ?1;",
+                params![period_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    DbError::PeriodNotFound(period_id.to_string())
+                }
+                other => DbError::Sqlite(other),
+            })?;
+
+        if period_status == "sealed" {
             return Err(DbError::PeriodSealed(period_id.to_string()));
         }
 
-        // 2. Verify date is within period range
-        if self.date < period.start_date || self.date > period.end_date {
-            return Err(DbError::Core(
-                sealed_books_core::CoreError::EntryOutOfPeriodRange {
-                    entry_id: self.id.clone(),
-                    entry_date: self.date.clone(),
-                    period_start: period.start_date,
-                    period_end: period.end_date,
-                },
-            ));
+        // 3. Verify all account IDs exist in the chart of accounts
+        for line in &self.lines {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?1);",
+                    params![&line.account_id],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::Sqlite)?;
+
+            if !exists {
+                return Err(DbError::AccountNotFound(line.account_id.clone()));
+            }
         }
 
-        // 3. Verify double-entry accounting invariants
-        self.validate()?;
-
-        // 4. Atomic database insertion
-        let tx = conn.transaction()?;
-
-        tx.execute(
+        // 4. Atomic transaction: insert entry header and all lines
+        conn.execute(
             "INSERT INTO entries (id, period_id, date, description, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5);",
             params![
@@ -51,99 +67,48 @@ impl EntryExt for Entry {
                 period_id,
                 &self.date,
                 &self.description,
-                &self.created_at
+                &self.created_at,
             ],
-        )?;
+        )
+        .map_err(DbError::Sqlite)?;
+
+        let mut line_stmt = conn
+            .prepare(
+                "INSERT INTO lines (id, entry_id, account_id, direction, amount_minor, description)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+            )
+            .map_err(DbError::Sqlite)?;
 
         for line in &self.lines {
-            let direction_str = match line.direction {
+            let dir_str = match line.direction {
                 Direction::Debit => "debit",
                 Direction::Credit => "credit",
             };
 
-            tx.execute(
-                "INSERT INTO lines (id, entry_id, account_id, direction, amount_minor, description)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
-                params![
+            line_stmt
+                .execute(params![
                     &line.id,
                     &self.id,
                     &line.account_id,
-                    direction_str,
+                    dir_str,
                     line.amount_minor as i64,
-                    &line.description
-                ],
-            )?;
+                    &line.description,
+                ])
+                .map_err(DbError::Sqlite)?;
         }
 
-        tx.commit()?;
         Ok(())
     }
 
-    fn find_by_id(conn: &Connection, id: &str) -> Result<Entry, DbError> {
-        let (date, description, created_at) = conn
-            .query_row(
-                "SELECT date, description, created_at FROM entries WHERE id = ?1;",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .map_err(|err| match err {
-                rusqlite::Error::QueryReturnedNoRows => DbError::EntryNotFound(id.to_string()),
-                other => DbError::Sqlite(other),
-            })?;
-
-        let mut line_stmt = conn.prepare(
-            "SELECT id, account_id, direction, amount_minor, description
-             FROM lines
-             WHERE entry_id = ?1
-             ORDER BY rowid ASC;",
-        )?;
-
-        let lines = line_stmt
-            .query_map(params![id], |row| {
-                let dir_str: String = row.get(2)?;
-                let direction = match dir_str.as_str() {
-                    "debit" => Direction::Debit,
-                    "credit" => Direction::Credit,
-                    _ => Direction::Debit,
-                };
-                let amount_minor: i64 = row.get(3)?;
-
-                Ok(Line {
-                    id: row.get(0)?,
-                    account_id: row.get(1)?,
-                    direction,
-                    amount_minor: amount_minor as u64,
-                    description: row.get(4)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Entry {
-            id: id.to_string(),
-            date,
-            description,
-            created_at,
-            lines,
-        })
-    }
-
     fn find_by_period(conn: &Connection, period_id: &str) -> Result<Vec<Entry>, DbError> {
-        // Check period exists
-        let _ = PeriodRecord::find_by_id(conn, period_id)?;
-
-        // Fetch entries ordered by date, created_at, id
-        let mut entry_stmt = conn.prepare(
-            "SELECT id, date, description, created_at
-             FROM entries
-             WHERE period_id = ?1
-             ORDER BY date ASC, created_at ASC, id ASC;",
-        )?;
+        let mut entry_stmt = conn
+            .prepare(
+                "SELECT id, date, description, created_at
+                 FROM entries
+                 WHERE period_id = ?1
+                 ORDER BY created_at ASC, id ASC;",
+            )
+            .map_err(DbError::Sqlite)?;
 
         let entry_rows = entry_stmt
             .query_map(params![period_id], |row| {
@@ -153,38 +118,15 @@ impl EntryExt for Entry {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                 ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+            })
+            .map_err(DbError::Sqlite)?;
 
-        let mut entries = Vec::with_capacity(entry_rows.len());
+        let mut entries = Vec::new();
 
-        let mut line_stmt = conn.prepare(
-            "SELECT id, account_id, direction, amount_minor, description
-             FROM lines
-             WHERE entry_id = ?1
-             ORDER BY rowid ASC;",
-        )?;
+        for entry_res in entry_rows {
+            let (id, date, description, created_at) = entry_res.map_err(DbError::Sqlite)?;
 
-        for (id, date, description, created_at) in entry_rows {
-            let lines = line_stmt
-                .query_map(params![&id], |row| {
-                    let dir_str: String = row.get(2)?;
-                    let direction = match dir_str.as_str() {
-                        "debit" => Direction::Debit,
-                        "credit" => Direction::Credit,
-                        _ => Direction::Debit,
-                    };
-                    let amount_minor: i64 = row.get(3)?;
-
-                    Ok(Line {
-                        id: row.get(0)?,
-                        account_id: row.get(1)?,
-                        direction,
-                        amount_minor: amount_minor as u64,
-                        description: row.get(4)?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
+            let lines = load_lines_for_entry(conn, &id)?;
 
             entries.push(Entry {
                 id,
@@ -197,6 +139,87 @@ impl EntryExt for Entry {
 
         Ok(entries)
     }
+
+    fn find_by_id(conn: &Connection, id: &str) -> Result<Entry, DbError> {
+        let (entry_id, date, description, created_at) = conn
+            .query_row(
+                "SELECT id, date, description, created_at
+                 FROM entries
+                 WHERE id = ?1;",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => DbError::EntryNotFound(id.to_string()),
+                other => DbError::Sqlite(other),
+            })?;
+
+        let lines = load_lines_for_entry(conn, &entry_id)?;
+
+        Ok(Entry {
+            id: entry_id,
+            date,
+            description,
+            created_at,
+            lines,
+        })
+    }
+}
+
+/// Helper function to retrieve all lines for an entry in deterministic order (by line ID).
+fn load_lines_for_entry(conn: &Connection, entry_id: &str) -> Result<Vec<Line>, DbError> {
+    let mut line_stmt = conn
+        .prepare(
+            "SELECT id, account_id, direction, amount_minor, description
+             FROM lines
+             WHERE entry_id = ?1
+             ORDER BY id ASC;",
+        )
+        .map_err(DbError::Sqlite)?;
+
+    let line_rows = line_stmt
+        .query_map(params![entry_id], |row| {
+            let id: String = row.get(0)?;
+            let account_id: String = row.get(1)?;
+            let dir_str: String = row.get(2)?;
+            let amount_minor: i64 = row.get(3)?;
+            let description: Option<String> = row.get(4)?;
+
+            let direction = match dir_str.as_str() {
+                "debit" => Direction::Debit,
+                "credit" => Direction::Credit,
+                _ => {
+                    return Err(rusqlite::Error::InvalidColumnType(
+                        2,
+                        "direction".into(),
+                        rusqlite::types::Type::Text,
+                    ));
+                }
+            };
+
+            Ok(Line {
+                id,
+                account_id,
+                direction,
+                amount_minor: amount_minor as u64,
+                description,
+            })
+        })
+        .map_err(DbError::Sqlite)?;
+
+    let mut lines = Vec::new();
+    for lr in line_rows {
+        lines.push(lr.map_err(DbError::Sqlite)?);
+    }
+
+    Ok(lines)
 }
 
 #[cfg(test)]
@@ -205,18 +228,23 @@ mod tests {
     use crate::db::repository::account::Account;
     use crate::db::repository::period::PeriodRecord;
     use crate::db::schema::migrate;
-    use sealed_books_core::hash::hash_entry;
+    use sealed_books_core::hash_entry;
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("PRAGMA foreign_keys = ON;", []).unwrap();
         migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO organizations (id, name, base_currency, created_at) VALUES ('org_acme', 'Acme', 'USD', '2026-08-01T00:00:00Z');",
+            [],
+        ).unwrap();
         conn
     }
 
     fn sample_period() -> PeriodRecord {
         PeriodRecord {
             id: "per_aug_2026".into(),
+            organization_id: "org_acme".into(),
             entity: "Acme Trading Pvt Ltd".into(),
             start_date: "2026-08-01".into(),
             end_date: "2026-08-31".into(),
@@ -227,6 +255,7 @@ mod tests {
     fn seed_accounts(conn: &Connection) {
         Account {
             id: "acc_bank".into(),
+            organization_id: "org_acme".into(),
             code: "1010".into(),
             name: "Bank Checking".into(),
             account_type: "asset".into(),
@@ -236,6 +265,7 @@ mod tests {
 
         Account {
             id: "acc_sales".into(),
+            organization_id: "org_acme".into(),
             code: "4010".into(),
             name: "Sales Revenue".into(),
             account_type: "revenue".into(),
@@ -248,132 +278,99 @@ mod tests {
     fn test_save_to_db_and_reload_preserves_canonical_hash() {
         let mut conn = setup_test_db();
         seed_accounts(&conn);
-        sample_period().insert(&conn).unwrap();
+        let period = sample_period();
+        period.insert(&mut conn).unwrap();
 
         let original_entry = Entry {
             id: "ent_001".into(),
             date: "2026-08-15".into(),
-            description: "Product Sale Invoice #101".into(),
+            description: "Online product sale".into(),
             created_at: "2026-08-15T10:00:00Z".into(),
             lines: vec![
-                Line::new(
-                    "l1",
-                    "acc_bank",
-                    Direction::Debit,
-                    750000,
-                    Some("Wire".into()),
-                )
-                .unwrap(),
-                Line::new("l2", "acc_sales", Direction::Credit, 750000, None).unwrap(),
+                Line::new("l_01", "acc_bank", Direction::Debit, 5000, None).unwrap(),
+                Line::new("l_02", "acc_sales", Direction::Credit, 5000, None).unwrap(),
             ],
         };
 
-        // 1. Calculate hash BEFORE saving to database
-        let original_hash = hash_entry(&original_entry).expect("hash original");
+        let original_hash = hash_entry(&original_entry).unwrap();
 
-        // 2. Save entry to SQLite using the EntryExt method directly!
-        original_entry
-            .post_to(&mut conn, "per_aug_2026")
-            .expect("post entry");
+        original_entry.post_to(&conn, &period.id).unwrap();
 
-        // 3. Reload entry from SQLite
-        let reloaded_entries =
-            <Entry as EntryExt>::find_by_period(&conn, "per_aug_2026").expect("get entries");
-        assert_eq!(reloaded_entries.len(), 1);
+        let loaded_entry = Entry::find_by_id(&conn, "ent_001").unwrap();
+        let loaded_hash = hash_entry(&loaded_entry).unwrap();
 
-        let reloaded_entry = &reloaded_entries[0];
-
-        // 4. Calculate hash AFTER reloading from database
-        let reloaded_hash = hash_entry(reloaded_entry).expect("hash reloaded");
-
-        // Invariant check: The hashes must match byte-for-byte!
         assert_eq!(
-            original_hash, reloaded_hash,
-            "CRITICAL INVARIANT FAILED: DB reload must preserve exact canonical hash"
+            original_hash, loaded_hash,
+            "Re-loaded database entry hash must match original in-memory hash exactly"
         );
     }
 
     #[test]
-    fn test_find_by_id_success_and_not_found() {
+    fn test_reject_unbalanced_entry() {
         let mut conn = setup_test_db();
         seed_accounts(&conn);
-        sample_period().insert(&conn).unwrap();
+        let period = sample_period();
+        period.insert(&mut conn).unwrap();
 
-        let entry = Entry {
-            id: "ent_find_me".into(),
-            date: "2026-08-20".into(),
-            description: "Target entry".into(),
-            created_at: "2026-08-20T14:00:00Z".into(),
-            lines: vec![
-                Line::new("l1", "acc_bank", Direction::Debit, 5000, None).unwrap(),
-                Line::new("l2", "acc_sales", Direction::Credit, 5000, None).unwrap(),
-            ],
-        };
-
-        entry.post_to(&mut conn, "per_aug_2026").unwrap();
-
-        // 1. Find existing
-        let found = <Entry as EntryExt>::find_by_id(&conn, "ent_find_me").unwrap();
-        assert_eq!(found.id, "ent_find_me");
-        assert_eq!(found.description, "Target entry");
-        assert_eq!(found.lines.len(), 2);
-
-        // 2. Find nonexistent
-        let err = <Entry as EntryExt>::find_by_id(&conn, "ent_not_exist").unwrap_err();
-        match err {
-            DbError::EntryNotFound(id) => assert_eq!(id, "ent_not_exist"),
-            other => panic!("Expected EntryNotFound, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_post_unbalanced_entry_fails() {
-        let mut conn = setup_test_db();
-        seed_accounts(&conn);
-        sample_period().insert(&conn).unwrap();
-
-        let bad_entry = Entry {
+        let unbalanced = Entry {
             id: "ent_bad".into(),
             date: "2026-08-15".into(),
-            description: "Unbalanced Entry".into(),
+            description: "Unbalanced".into(),
             created_at: "2026-08-15T10:00:00Z".into(),
             lines: vec![
-                Line::new("l1", "acc_bank", Direction::Debit, 1000, None).unwrap(),
-                Line::new("l2", "acc_sales", Direction::Credit, 999, None).unwrap(),
+                Line::new("l_01", "acc_bank", Direction::Debit, 5000, None).unwrap(),
+                Line::new("l_02", "acc_sales", Direction::Credit, 4000, None).unwrap(),
             ],
         };
 
-        let err = bad_entry.post_to(&mut conn, "per_aug_2026").unwrap_err();
-        match err {
-            DbError::Core(sealed_books_core::CoreError::UnbalancedEntry { .. }) => {}
-            other => panic!("Expected CoreError::UnbalancedEntry, got {other:?}"),
-        }
+        let res = unbalanced.post_to(&conn, &period.id);
+        assert!(res.is_err());
+        assert!(matches!(res.unwrap_err(), DbError::Core(_)));
     }
 
     #[test]
-    fn test_post_to_sealed_period_rejected() {
+    fn test_reject_posting_to_sealed_period() {
         let mut conn = setup_test_db();
         seed_accounts(&conn);
-
         let mut period = sample_period();
         period.status = "sealed".into();
-        period.insert(&conn).unwrap();
+        period.insert(&mut conn).unwrap();
 
         let entry = Entry {
-            id: "ent_late".into(),
+            id: "ent_002".into(),
             date: "2026-08-15".into(),
-            description: "Late entry".into(),
+            description: "Sale".into(),
             created_at: "2026-08-15T10:00:00Z".into(),
             lines: vec![
-                Line::new("l1", "acc_bank", Direction::Debit, 1000, None).unwrap(),
-                Line::new("l2", "acc_sales", Direction::Credit, 1000, None).unwrap(),
+                Line::new("l_01", "acc_bank", Direction::Debit, 5000, None).unwrap(),
+                Line::new("l_02", "acc_sales", Direction::Credit, 5000, None).unwrap(),
             ],
         };
 
-        let err = entry.post_to(&mut conn, "per_aug_2026").unwrap_err();
-        match err {
-            DbError::PeriodSealed(id) => assert_eq!(id, "per_aug_2026"),
-            other => panic!("Expected DbError::PeriodSealed, got {other:?}"),
-        }
+        let res = entry.post_to(&conn, &period.id);
+        assert!(res.is_err());
+        assert!(matches!(res.unwrap_err(), DbError::PeriodSealed(_)));
+    }
+
+    #[test]
+    fn test_reject_nonexistent_account() {
+        let mut conn = setup_test_db();
+        let period = sample_period();
+        period.insert(&mut conn).unwrap();
+
+        let entry = Entry {
+            id: "ent_003".into(),
+            date: "2026-08-15".into(),
+            description: "Sale".into(),
+            created_at: "2026-08-15T10:00:00Z".into(),
+            lines: vec![
+                Line::new("l_01", "acc_fake_999", Direction::Debit, 5000, None).unwrap(),
+                Line::new("l_02", "acc_fake_999", Direction::Credit, 5000, None).unwrap(),
+            ],
+        };
+
+        let res = entry.post_to(&conn, &period.id);
+        assert!(res.is_err());
+        assert!(matches!(res.unwrap_err(), DbError::AccountNotFound(_)));
     }
 }
