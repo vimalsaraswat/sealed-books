@@ -59,10 +59,10 @@ impl Line {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
-    /// Calendar date of entry: YYYY-MM-DD
+    /// Calendar date in ISO 8601 format: YYYY-MM-DD.
     pub date: String,
     pub description: String,
-    /// UTC timestamp when entry was recorded: YYYY-MM-DDTHH:MM:SSZ
+    /// Timestamp in UTC RFC 3339 format.
     pub created_at: String,
     pub lines: Vec<Line>,
 }
@@ -72,6 +72,7 @@ impl Entry {
     /// 1. Must contain at least 2 lines.
     /// 2. Every line must have an amount > 0.
     /// 3. Total debits must equal total credits exactly (double-entry equation).
+    /// 4. Date must follow YYYY-MM-DD format.
     pub fn validate(&self) -> Result<(), CoreError> {
         if self.lines.len() < 2 {
             return Err(CoreError::InvalidLineCount {
@@ -91,10 +92,20 @@ impl Entry {
             }
             match line.direction {
                 Direction::Debit => {
-                    total_debits = total_debits.saturating_add(line.amount_minor);
+                    total_debits =
+                        total_debits.checked_add(line.amount_minor).ok_or_else(|| {
+                            CoreError::SerializationError("Debit minor units overflowed u64".into())
+                        })?;
                 }
                 Direction::Credit => {
-                    total_credits = total_credits.saturating_add(line.amount_minor);
+                    total_credits =
+                        total_credits
+                            .checked_add(line.amount_minor)
+                            .ok_or_else(|| {
+                                CoreError::SerializationError(
+                                    "Credit minor units overflowed u64".into(),
+                                )
+                            })?;
                 }
             }
         }
@@ -106,6 +117,8 @@ impl Entry {
                 credits_minor: total_credits,
             });
         }
+
+        Self::validate_date_format(&self.date)?;
 
         Ok(())
     }
@@ -127,9 +140,35 @@ impl Entry {
             .map(|l| l.amount_minor)
             .sum()
     }
+
+    /// Validates YYYY-MM-DD date string.
+    pub fn validate_date_format(date_str: &str) -> Result<(), CoreError> {
+        if date_str.len() != 10 {
+            return Err(CoreError::InvalidDateFormat(date_str.to_string()));
+        }
+        let parts: Vec<&str> = date_str.split('-').collect();
+        if parts.len() != 3 {
+            return Err(CoreError::InvalidDateFormat(date_str.to_string()));
+        }
+        let year: u32 = parts[0]
+            .parse()
+            .map_err(|_| CoreError::InvalidDateFormat(date_str.to_string()))?;
+        let month: u32 = parts[1]
+            .parse()
+            .map_err(|_| CoreError::InvalidDateFormat(date_str.to_string()))?;
+        let day: u32 = parts[2]
+            .parse()
+            .map_err(|_| CoreError::InvalidDateFormat(date_str.to_string()))?;
+
+        if !(1000..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day)
+        {
+            return Err(CoreError::InvalidDateFormat(date_str.to_string()));
+        }
+        Ok(())
+    }
 }
 
-/// An accounting period subject to seal closure.
+/// An accounting period with inclusive calendar boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Period {
     pub id: String,
@@ -143,10 +182,26 @@ pub struct Period {
 
 impl Period {
     pub fn validate(&self) -> Result<(), CoreError> {
+        Entry::validate_date_format(&self.start_date)?;
+        Entry::validate_date_format(&self.end_date)?;
         if self.start_date > self.end_date {
             return Err(CoreError::InvalidPeriodRange {
                 start: self.start_date.clone(),
                 end: self.end_date.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Checks if a date string falls inclusively within this period.
+    pub fn contains_date(&self, date_str: &str) -> Result<(), CoreError> {
+        Entry::validate_date_format(date_str)?;
+        if date_str < self.start_date.as_str() || date_str > self.end_date.as_str() {
+            return Err(CoreError::EntryOutOfPeriodRange {
+                entry_id: String::new(),
+                entry_date: date_str.to_string(),
+                period_start: self.start_date.clone(),
+                period_end: self.end_date.clone(),
             });
         }
         Ok(())
@@ -188,6 +243,21 @@ impl SealStatement {
             hex::encode(self.ledger_root)
         )
     }
+}
+
+/// The published on-chain consensus record combining the period close statement
+/// and the two distinct approver signatures required for sealing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealPayload {
+    pub statement: SealStatement,
+    #[serde(with = "hex_33")]
+    pub approver_1_pubkey: [u8; 33],
+    #[serde(with = "hex_64")]
+    pub approver_1_sig: [u8; 64],
+    #[serde(with = "hex_33")]
+    pub approver_2_pubkey: [u8; 33],
+    #[serde(with = "hex_64")]
+    pub approver_2_sig: [u8; 64],
 }
 
 /// Result of verifying a set of entries against a sealed statement.
@@ -255,6 +325,64 @@ mod hex_32 {
             )));
         }
         let mut arr = [0u8; 32];
+        arr.copy_from_slice(&vec);
+        Ok(arr)
+    }
+}
+
+mod hex_33 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 33], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 33], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let clean = s.trim_start_matches("0x");
+        let vec = hex::decode(clean).map_err(serde::de::Error::custom)?;
+        if vec.len() != 33 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 33 bytes for compressed public key, got {}",
+                vec.len()
+            )));
+        }
+        let mut arr = [0u8; 33];
+        arr.copy_from_slice(&vec);
+        Ok(arr)
+    }
+}
+
+mod hex_64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let clean = s.trim_start_matches("0x");
+        let vec = hex::decode(clean).map_err(serde::de::Error::custom)?;
+        if vec.len() != 64 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 64 bytes for signature (r||s), got {}",
+                vec.len()
+            )));
+        }
+        let mut arr = [0u8; 64];
         arr.copy_from_slice(&vec);
         Ok(arr)
     }

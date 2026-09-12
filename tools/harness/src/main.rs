@@ -1,9 +1,10 @@
 //! Integration & Network Probe Harness CLI Runner
 //!
 //! Usage:
-//!   cargo run -p harness          # runs all probes
-//!   cargo run -p harness hedera   # runs only Hedera HCS probe
-//!   cargo run -p harness privy    # runs only Privy wallet/signature probe
+//!   cargo run -p harness            # runs all probes
+//!   cargo run -p harness hedera     # runs only Hedera HCS probe
+//!   cargo run -p harness privy      # runs only Privy wallet/signature probe
+//!   cargo run -p harness provision  # provisions 3 approver wallets with policy
 
 mod crypto;
 mod hedera;
@@ -24,23 +25,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut had_failures = false;
 
-    if mode == "all" || mode == "hedera" {
-        println!("\n>>> [1/2] Running Hedera Consensus Service Probe...");
-        if let Err(e) = hedera::run_hedera_probe().await {
-            eprintln!("❌ Hedera probe FAILED: {e}");
+    if mode == "provision" {
+        println!("\n>>> Provisioning Approver Wallets & Policy via Privy...");
+        if let Err(e) = privy::run_provision().await {
+            eprintln!("❌ Provisioning FAILED: {e}");
             had_failures = true;
         } else {
-            println!("✅ Hedera probe SUCCEEDED!");
+            println!("\n✅ Approver provisioning SUCCEEDED!");
         }
-    }
+    } else {
+        if mode == "all" || mode == "hedera" {
+            println!("\n>>> [1/2] Running Hedera Consensus Service Probe...");
+            if let Err(e) = hedera::run_hedera_probe().await {
+                eprintln!("❌ Hedera probe FAILED: {e}");
+                had_failures = true;
+            } else {
+                println!("✅ Hedera probe SUCCEEDED!");
+            }
+        }
 
-    if mode == "all" || mode == "privy" {
-        println!("\n>>> [2/2] Running Privy Wallet & Signature Probe...");
-        if let Err(e) = privy::run_privy_probe().await {
-            eprintln!("❌ Privy probe FAILED: {e}");
-            had_failures = true;
-        } else {
-            println!("✅ Privy probe SUCCEEDED!");
+        if mode == "all" || mode == "privy" {
+            println!("\n>>> [2/2] Running Privy Wallet & Signature Probe...");
+            if let Err(e) = privy::run_privy_probe().await {
+                eprintln!("❌ Privy probe FAILED: {e}");
+                had_failures = true;
+            } else {
+                println!("✅ Privy probe SUCCEEDED!");
+            }
         }
     }
 

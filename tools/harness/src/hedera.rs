@@ -44,9 +44,7 @@ pub async fn run_hedera_probe() -> Result<(), Box<dyn std::error::Error>> {
 
     let resp = tx_create.execute(&client).await?;
     let receipt = resp.get_receipt(&client).await?;
-    let topic_id = receipt
-        .topic_id
-        .ok_or("Receipt did not contain topic ID")?;
+    let topic_id = receipt.topic_id.ok_or("Receipt did not contain topic ID")?;
 
     println!("  -> Topic created: {topic_id}");
     println!("  -> HashScan URL:  https://hashscan.io/testnet/topic/{topic_id}");
@@ -72,9 +70,8 @@ pub async fn run_hedera_probe() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("• Polling Hedera Testnet Mirror Node REST API for topic messages...");
-    let mirror_url = format!(
-        "https://testnet.mirrornode.hedera.com/api/v1/topics/{topic_id}/messages"
-    );
+    let mirror_url =
+        format!("https://testnet.mirrornode.hedera.com/api/v1/topics/{topic_id}/messages");
     println!("  -> Endpoint: {mirror_url}");
 
     let http_client = reqwest::Client::new();
@@ -119,10 +116,9 @@ pub async fn run_hedera_probe() -> Result<(), Box<dyn std::error::Error>> {
     if decoded_str == test_payload {
         println!("  -> Verification SUCCESS: Decoded payload matches original message exactly.");
     } else {
-        return Err(format!(
-            "Payload mismatch! Expected '{test_payload}', got '{decoded_str}'"
-        )
-        .into());
+        return Err(
+            format!("Payload mismatch! Expected '{test_payload}', got '{decoded_str}'").into(),
+        );
     }
 
     Ok(())

@@ -1,4 +1,4 @@
-//! Canonical binary serializer for Sealed Books.
+//! Canonical binary serializer and deserializer for Sealed Books.
 //!
 //! Enforces the 5 canonical encoding rules:
 //! 1. Fixed field order.
@@ -11,7 +11,8 @@
 //! so that identical entries created with different line insertion orders serialize
 //! to byte-for-byte identical output.
 
-use crate::types::{Entry, Line, SealStatement};
+use crate::error::CoreError;
+use crate::types::{Entry, Line, SealPayload, SealStatement};
 
 pub const CANONICAL_VERSION_V1: u8 = 0x01;
 
@@ -120,6 +121,145 @@ pub fn encode_statement(statement: &SealStatement) -> Vec<u8> {
     buf
 }
 
+/// Canonically encodes a full on-chain SealPayload into a compact binary message (~430 bytes).
+pub fn encode_seal_payload(payload: &SealPayload) -> Vec<u8> {
+    let mut buf = encode_statement(&payload.statement);
+    buf.extend_from_slice(&payload.approver_1_pubkey);
+    buf.extend_from_slice(&payload.approver_1_sig);
+    buf.extend_from_slice(&payload.approver_2_pubkey);
+    buf.extend_from_slice(&payload.approver_2_sig);
+    buf
+}
+
+/// Internal cursor for zero-copy binary reading.
+struct ByteReader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteReader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    fn read_u8(&mut self) -> Result<u8, CoreError> {
+        if self.pos < self.buf.len() {
+            let b = self.buf[self.pos];
+            self.pos += 1;
+            Ok(b)
+        } else {
+            Err(CoreError::SerializationError(
+                "Unexpected end of buffer while reading u8".into(),
+            ))
+        }
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], CoreError> {
+        if self.pos + len <= self.buf.len() {
+            let slice = &self.buf[self.pos..self.pos + len];
+            self.pos += len;
+            Ok(slice)
+        } else {
+            Err(CoreError::SerializationError(format!(
+                "Unexpected end of buffer: requested {len} bytes, {} available",
+                self.buf.len().saturating_sub(self.pos)
+            )))
+        }
+    }
+
+    fn read_u32_be(&mut self) -> Result<u32, CoreError> {
+        let bytes = self.read_bytes(4)?;
+        Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn read_u64_be(&mut self) -> Result<u64, CoreError> {
+        let bytes = self.read_bytes(8)?;
+        Ok(u64::from_be_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn read_exact<const N: usize>(&mut self) -> Result<[u8; N], CoreError> {
+        let bytes = self.read_bytes(N)?;
+        let mut arr = [0u8; N];
+        arr.copy_from_slice(bytes);
+        Ok(arr)
+    }
+
+    fn read_str(&mut self) -> Result<String, CoreError> {
+        let len = self.read_u32_be()? as usize;
+        let bytes = self.read_bytes(len)?;
+        std::str::from_utf8(bytes)
+            .map(|s| s.to_string())
+            .map_err(|e| CoreError::SerializationError(format!("Invalid UTF-8 string: {e}")))
+    }
+
+    fn ensure_empty(&self) -> Result<(), CoreError> {
+        if self.pos == self.buf.len() {
+            Ok(())
+        } else {
+            Err(CoreError::SerializationError(format!(
+                "Trailing bytes remaining: read {} of {} bytes",
+                self.pos,
+                self.buf.len()
+            )))
+        }
+    }
+}
+
+/// Decodes a `SealStatement` from a reader.
+fn decode_statement_from_reader(reader: &mut ByteReader) -> Result<SealStatement, CoreError> {
+    let version = reader.read_u8()?;
+    if version != CANONICAL_VERSION_V1 {
+        return Err(CoreError::SerializationError(format!(
+            "Unsupported statement version: expected {CANONICAL_VERSION_V1}, got {version}"
+        )));
+    }
+    let entity = reader.read_str()?;
+    let period_start = reader.read_str()?;
+    let period_end = reader.read_str()?;
+    let entry_count = reader.read_u64_be()?;
+    let total_debits_minor = reader.read_u64_be()?;
+    let total_credits_minor = reader.read_u64_be()?;
+    let ledger_root = reader.read_exact::<32>()?;
+
+    Ok(SealStatement {
+        version,
+        entity,
+        period_start,
+        period_end,
+        entry_count,
+        total_debits_minor,
+        total_credits_minor,
+        ledger_root,
+    })
+}
+
+/// Decodes a canonically encoded `SealStatement` from binary bytes.
+pub fn decode_statement(bytes: &[u8]) -> Result<SealStatement, CoreError> {
+    let mut reader = ByteReader::new(bytes);
+    let statement = decode_statement_from_reader(&mut reader)?;
+    reader.ensure_empty()?;
+    Ok(statement)
+}
+
+/// Decodes a canonically encoded `SealPayload` from binary bytes.
+pub fn decode_seal_payload(bytes: &[u8]) -> Result<SealPayload, CoreError> {
+    let mut reader = ByteReader::new(bytes);
+    let statement = decode_statement_from_reader(&mut reader)?;
+    let approver_1_pubkey = reader.read_exact::<33>()?;
+    let approver_1_sig = reader.read_exact::<64>()?;
+    let approver_2_pubkey = reader.read_exact::<33>()?;
+    let approver_2_sig = reader.read_exact::<64>()?;
+    reader.ensure_empty()?;
+
+    Ok(SealPayload {
+        statement,
+        approver_1_pubkey,
+        approver_1_sig,
+        approver_2_pubkey,
+        approver_2_sig,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +282,19 @@ mod tests {
                 .unwrap(),
                 Line::new("l2", "acc_revenue", Direction::Credit, 500000, None).unwrap(),
             ],
+        }
+    }
+
+    fn sample_statement() -> SealStatement {
+        SealStatement {
+            version: CANONICAL_VERSION_V1,
+            entity: "Acme Trading Pvt Ltd".into(),
+            period_start: "2026-08-01".into(),
+            period_end: "2026-08-31".into(),
+            entry_count: 16,
+            total_debits_minor: 12185000,
+            total_credits_minor: 12185000,
+            ledger_root: [0x42; 32],
         }
     }
 
@@ -214,19 +367,69 @@ mod tests {
 
     #[test]
     fn test_statement_encoding() {
-        let statement = SealStatement {
-            version: CANONICAL_VERSION_V1,
-            entity: "Acme Corp".into(),
-            period_start: "2026-08-01".into(),
-            period_end: "2026-08-31".into(),
-            entry_count: 100,
-            total_debits_minor: 1234567,
-            total_credits_minor: 1234567,
-            ledger_root: [0x42; 32],
-        };
-
+        let statement = sample_statement();
         let bytes = encode_statement(&statement);
         assert_eq!(bytes[0], CANONICAL_VERSION_V1);
         assert_eq!(&bytes[bytes.len() - 32..], &[0x42; 32]);
+    }
+
+    #[test]
+    fn test_statement_encoding_and_decoding_roundtrip() {
+        let statement = sample_statement();
+        let encoded = encode_statement(&statement);
+        let decoded = decode_statement(&encoded).expect("statement roundtrip decode");
+        assert_eq!(statement, decoded);
+    }
+
+    #[test]
+    fn test_seal_payload_encoding_and_decoding_roundtrip() {
+        let payload = SealPayload {
+            statement: sample_statement(),
+            approver_1_pubkey: [0x02; 33],
+            approver_1_sig: [0x11; 64],
+            approver_2_pubkey: [0x03; 33],
+            approver_2_sig: [0x22; 64],
+        };
+
+        let encoded = encode_seal_payload(&payload);
+        // Size must be compact: statement (~100 bytes) + 33 + 64 + 33 + 64 = ~294 bytes
+        assert!(encoded.len() < 400);
+        assert!(encoded.len() > 200);
+
+        let decoded = decode_seal_payload(&encoded).expect("seal payload roundtrip decode");
+        assert_eq!(payload, decoded);
+    }
+
+    #[test]
+    fn test_decode_seal_payload_rejects_truncated_bytes() {
+        let payload = SealPayload {
+            statement: sample_statement(),
+            approver_1_pubkey: [0x02; 33],
+            approver_1_sig: [0x11; 64],
+            approver_2_pubkey: [0x03; 33],
+            approver_2_sig: [0x22; 64],
+        };
+
+        let encoded = encode_seal_payload(&payload);
+        // Truncate last 10 bytes
+        let truncated = &encoded[..encoded.len() - 10];
+        let res = decode_seal_payload(truncated);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_decode_seal_payload_rejects_trailing_junk() {
+        let payload = SealPayload {
+            statement: sample_statement(),
+            approver_1_pubkey: [0x02; 33],
+            approver_1_sig: [0x11; 64],
+            approver_2_pubkey: [0x03; 33],
+            approver_2_sig: [0x22; 64],
+        };
+
+        let mut corrupted = encode_seal_payload(&payload);
+        corrupted.push(0xff); // trailing extra byte
+        let res = decode_seal_payload(&corrupted);
+        assert!(res.is_err());
     }
 }
