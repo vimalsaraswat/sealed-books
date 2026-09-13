@@ -47,8 +47,8 @@ impl AppState {
                 );
                 let store = MockMessageStore::new();
                 (
-                    PublisherClient::mock_with_store(store.clone()),
-                    MirrorClient::mock(store),
+                    PublisherClient::mock_with_store(store),
+                    MirrorClient::live_from_env(),
                 )
             }
         };
