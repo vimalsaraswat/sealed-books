@@ -206,6 +206,7 @@ async fn invite_member(
                 name,
                 pubkey,
                 eth_address,
+                wallet_id: None,
                 created_at: Utc::now().to_rfc3339(),
             };
             new_user.insert(conn).await?;

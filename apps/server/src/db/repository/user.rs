@@ -11,6 +11,7 @@ pub struct User {
     pub name: String,
     pub pubkey: String,
     pub eth_address: String,
+    pub wallet_id: Option<String>,
     pub created_at: String,
 }
 
@@ -18,14 +19,15 @@ impl User {
     /// Inserts a new user into the database.
     pub async fn insert(&self, conn: &Connection) -> Result<(), DbError> {
         conn.execute(
-            "INSERT INTO users (id, email, name, pubkey, eth_address, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+            "INSERT INTO users (id, email, name, pubkey, eth_address, wallet_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
             params![
                 self.id.as_str(),
                 self.email.as_str(),
                 self.name.as_str(),
                 self.pubkey.as_str(),
                 self.eth_address.as_str(),
+                self.wallet_id.as_deref(),
                 self.created_at.as_str()
             ],
         )
@@ -37,7 +39,7 @@ impl User {
     pub async fn find_by_id(conn: &Connection, id: &str) -> Result<Self, DbError> {
         let mut rows = conn
             .query(
-                "SELECT id, email, name, pubkey, eth_address, created_at FROM users WHERE id = ?1;",
+                "SELECT id, email, name, pubkey, eth_address, wallet_id, created_at FROM users WHERE id = ?1;",
                 params![id],
             )
             .await?;
@@ -49,7 +51,8 @@ impl User {
                 name: row.get(2)?,
                 pubkey: row.get(3)?,
                 eth_address: row.get(4)?,
-                created_at: row.get(5)?,
+                wallet_id: row.get(5)?,
+                created_at: row.get(6)?,
             })
         } else {
             Err(DbError::EntityNotFound(format!("User not found: {id}")))
@@ -60,7 +63,7 @@ impl User {
     pub async fn find_by_email(conn: &Connection, email: &str) -> Result<Self, DbError> {
         let mut rows = conn
             .query(
-                "SELECT id, email, name, pubkey, eth_address, created_at FROM users WHERE email = ?1;",
+                "SELECT id, email, name, pubkey, eth_address, wallet_id, created_at FROM users WHERE email = ?1;",
                 params![email],
             )
             .await?;
@@ -72,7 +75,8 @@ impl User {
                 name: row.get(2)?,
                 pubkey: row.get(3)?,
                 eth_address: row.get(4)?,
-                created_at: row.get(5)?,
+                wallet_id: row.get(5)?,
+                created_at: row.get(6)?,
             })
         } else {
             Err(DbError::EntityNotFound(format!(
@@ -85,7 +89,7 @@ impl User {
     pub async fn list_all(conn: &Connection) -> Result<Vec<Self>, DbError> {
         let mut rows = conn
             .query(
-                "SELECT id, email, name, pubkey, eth_address, created_at FROM users ORDER BY name ASC;",
+                "SELECT id, email, name, pubkey, eth_address, wallet_id, created_at FROM users ORDER BY name ASC;",
                 (),
             )
             .await?;
@@ -98,7 +102,8 @@ impl User {
                 name: row.get(2)?,
                 pubkey: row.get(3)?,
                 eth_address: row.get(4)?,
-                created_at: row.get(5)?,
+                wallet_id: row.get(5)?,
+                created_at: row.get(6)?,
             });
         }
         Ok(users)

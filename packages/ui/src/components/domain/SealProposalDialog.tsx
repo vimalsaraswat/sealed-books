@@ -12,8 +12,8 @@ import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { Card, CardContent } from "../ui/card";
 import { formatCurrency, truncateHash } from "../../lib/utils";
-import { getUserSigningKey, signStatementHash } from "../../lib/signer";
-import type { ProposeResponse, SealRecord } from "../../types";
+
+import type { ProposeResponse, SealRecord, OrgMember } from "../../types";
 import {
   Lock,
   CheckCircle2,
@@ -30,9 +30,10 @@ export interface SealProposalDialogProps {
   onOpenChange: (open: boolean) => void;
   proposal: ProposeResponse | null;
   seal?: SealRecord | null;
-  onApprove: (data: {
-    approver_pubkey: string;
-    signature: string;
+  onApprove: (data?: {
+    approver_pubkey?: string;
+    signature?: string;
+    wallet_id?: string;
   }) => Promise<void>;
   onDispatch?: (auditorId: string) => Promise<void>;
   onPublish: () => Promise<SealRecord>;
@@ -57,11 +58,13 @@ export function SealProposalDialog({
   const [isDispatched, setIsDispatched] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const { currentUser } = useAuth();
-  const controllerId = currentUser?.id || "usr_alice";
-  const controllerKey = getUserSigningKey(controllerId);
+  const { currentUser, activeOrg, api } = useAuth();
+  const controllerId = currentUser?.id || "controller";
+  const [auditors, setAuditors] = useState<OrgMember[]>([]);
+  const [selectedAuditorId, setSelectedAuditorId] = useState<string>("");
 
-  // Reset state on open
+
+  // Reset state and load auditors on open
   useEffect(() => {
     if (open) {
       setApprovals(new Map());
@@ -69,8 +72,20 @@ export function SealProposalDialog({
       setIsDispatching(false);
       setIsDispatched(seal?.dispatch_status === "pending_auditor");
       setErrorMsg(null);
+
+      if (activeOrg && api) {
+        api.getOrgMembers(activeOrg.id)
+          .then((members: OrgMember[]) => {
+            const auditList = members.filter((m: OrgMember) => m.role === "auditor");
+            setAuditors(auditList);
+            if (auditList.length > 0) {
+              setSelectedAuditorId(auditList[0].user_id);
+            }
+          })
+          .catch(console.error);
+      }
     }
-  }, [open, seal]);
+  }, [open, seal, activeOrg, api]);
 
   if (!proposal) return null;
 
@@ -92,19 +107,14 @@ export function SealProposalDialog({
         );
       }
 
-      const { signatureHex, pubkeyHex, address } = signStatementHash(
-        hashToSign,
-        controllerKey,
-      );
-
-      await onApprove({
-        approver_pubkey: pubkeyHex,
-        signature: signatureHex,
-      });
+      await onApprove();
 
       setApprovals((prev) => {
         const next = new Map(prev);
-        next.set(controllerId, { signature: signatureHex, address });
+        next.set(controllerId, {
+          signature: "Server Wallet Signed",
+          address: currentUser?.eth_address || (seal?.approver_1_pubkey ? truncateHash(seal.approver_1_pubkey, 8, 6) : "Configured Server Wallet"),
+        });
         return next;
       });
     } catch (err: unknown) {
@@ -121,7 +131,7 @@ export function SealProposalDialog({
     try {
       setErrorMsg(null);
       setIsDispatching(true);
-      await onDispatch("usr_bob");
+      await onDispatch(selectedAuditorId || "");
       setIsDispatched(true);
     } catch (err: unknown) {
       const msg =
@@ -267,7 +277,7 @@ export function SealProposalDialog({
                     </Badge>
                   </div>
                   <div className="text-[11px] font-mono text-muted-foreground">
-                    Address: {controllerId} (Controller)
+                    Address: {currentUser?.eth_address ? truncateHash(currentUser.eth_address, 8, 6) : (seal?.approver_1_pubkey ? truncateHash(seal.approver_1_pubkey, 8, 6) : "Not connected")} (Server Wallet)
                   </div>
                 </div>
 
@@ -350,11 +360,30 @@ export function SealProposalDialog({
                   </div>
                   <p className="text-[11px] text-muted-foreground">
                     Your Controller signature is recorded. Dispatch this seal
-                    proposal to the statutory auditor (Bob) for formal
+                    proposal to an independent statutory auditor for formal
                     dual-custody sign-off.
                   </p>
                 </div>
               </div>
+
+              {auditors.length > 0 ? (
+                <div className="space-y-1.5 pt-1">
+                  <label className="text-[11px] font-medium text-foreground">
+                    Select Statutory Auditor:
+                  </label>
+                  <select
+                    value={selectedAuditorId}
+                    onChange={(e) => setSelectedAuditorId(e.target.value)}
+                    className="w-full text-xs rounded-md border border-input bg-background px-3 py-1.5 text-foreground shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                  >
+                    {auditors.map((auditor) => (
+                      <option key={auditor.user_id} value={auditor.user_id}>
+                        {auditor.name} ({auditor.email})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
 
               <div className="flex justify-end">
                 <Button

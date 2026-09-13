@@ -43,15 +43,17 @@ export interface LedgerContextValue {
   loadAccountsAndPeriods: () => Promise<void>;
   handlePeriodChange: (newId: string) => Promise<void>;
   handleOpenCloseDialog: () => Promise<ProposeResponse | null>;
-  handleApproveSeal: (data: {
-    approver_pubkey: string;
-    signature: string;
+  handleApproveSeal: (data?: {
+    approver_pubkey?: string;
+    signature?: string;
+    wallet_id?: string;
   }) => Promise<void>;
   handleDispatchSeal: (auditorId: string) => Promise<void>;
   handleAuditorReject: (notes: string) => Promise<void>;
-  handleAuditorApproveAndPublish: (data: {
-    approver_pubkey: string;
-    signature: string;
+  handleAuditorApproveAndPublish: (data?: {
+    approver_pubkey?: string;
+    signature?: string;
+    wallet_id?: string;
   }) => Promise<SealRecord>;
   handlePublishSeal: () => Promise<SealRecord>;
   handleVerify: () => Promise<VerificationReport | null>;
@@ -128,7 +130,7 @@ export function LedgerProvider({ api, children }: LedgerProviderProps) {
 
       if (periodsData.length > 0) {
         const active =
-          periodsData.find((p: Period) => p.id === "per_2026_08") || periodsData[0];
+          periodsData.find((p: Period) => p.status === "open") || periodsData[0];
         setSelectedPeriodId(active.id);
         await loadPeriodData(active.id);
       } else {
@@ -173,7 +175,11 @@ export function LedgerProvider({ api, children }: LedgerProviderProps) {
   }, [api, currentPeriod]);
 
   const handleApproveSeal = useCallback(
-    async (data: { approver_pubkey: string; signature: string }) => {
+    async (data?: {
+      approver_pubkey?: string;
+      signature?: string;
+      wallet_id?: string;
+    }) => {
       if (!currentPeriod) return;
       await api.approveSeal(currentPeriod.id, data);
       await loadPeriodData(currentPeriod.id);
@@ -202,9 +208,10 @@ export function LedgerProvider({ api, children }: LedgerProviderProps) {
   );
 
   const handleAuditorApproveAndPublish = useCallback(
-    async (data: {
-      approver_pubkey: string;
-      signature: string;
+    async (data?: {
+      approver_pubkey?: string;
+      signature?: string;
+      wallet_id?: string;
     }): Promise<SealRecord> => {
       if (!currentPeriod) throw new Error("No active period");
       await api.approveSeal(currentPeriod.id, data);

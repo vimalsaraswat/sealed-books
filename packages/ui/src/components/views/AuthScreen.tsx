@@ -194,7 +194,7 @@ export function AuthScreen() {
                           <User className="size-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
                           <Input
                             type="text"
-                            placeholder="e.g. Alice Chen"
+                            placeholder="e.g. Jane Doe"
                             value={name}
                             onChange={(e) => setName(e.target.value)}
                             className="pl-8 text-xs h-8"

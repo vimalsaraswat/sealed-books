@@ -32,6 +32,7 @@ pub fn generate_user_identity(email: &str, name: &str) -> User {
         name: name.to_string(),
         pubkey: pubkey_hex,
         eth_address: eth_addr,
+        wallet_id: None,
         created_at: Utc::now().to_rfc3339(),
     }
 }

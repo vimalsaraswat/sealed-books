@@ -19,13 +19,13 @@ use sealed_books_core::types::{Entry, SealPayload, SealStatement};
 use sealed_books_core::{build_statement, encode_seal_payload, statement_hash};
 
 /// Request payload for submitting an approval signature.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ApproveRequest {
-    /// 33-byte compressed secp256k1 public key as hex (optional if using wallet_id).
+    /// 33-byte compressed secp256k1 public key as hex (optional if using wallet_id or auth user's Privy wallet).
     pub approver_pubkey: Option<String>,
-    /// 64-byte (r||s) or 65-byte (r||s||v) signature as hex (optional if using wallet_id).
+    /// 64-byte (r||s) or 65-byte (r||s||v) signature as hex (optional if using wallet_id or auth user's Privy wallet).
     pub signature: Option<String>,
-    /// Privy server wallet ID to sign via attached Privy policy.
+    /// Privy server wallet ID to sign via attached Privy policy (optional, defaults to authenticated user's wallet).
     pub wallet_id: Option<String>,
 }
 
@@ -188,34 +188,32 @@ async fn propose_seal(
     ))
 }
 
-/// Dispatches a proposed seal to an auditor for review.
+/// Dispatches a proposed seal to an auditor for external review.
 async fn dispatch_seal(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(period_id): Path<String>,
     Json(payload): Json<DispatchSealRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<SealRecord>, ApiError> {
     if auth.role == "auditor" || auth.role == "staff" {
         return Err(ApiError::Forbidden(
-            "Only Organization Owners, Admins, or Controllers can dispatch a seal to auditors"
-                .into(),
+            "Only Organization Owners, Admins, or Controllers can dispatch a period seal to an auditor".into(),
         ));
     }
 
-    let auditor_id = payload.auditor_id.unwrap_or_else(|| "usr_bob".into());
-
     let conn = state.db.conn();
-    SealRecord::dispatch_to_auditor(conn, &period_id, &auditor_id).await?;
+    let mut seal = SealRecord::find_by_period_id(conn, &period_id)
+        .await
+        .map_err(|_| ApiError::BadRequest("Seal must be proposed before dispatching".into()))?;
 
-    Ok(Json(serde_json::json!({
-        "status": "dispatched",
-        "period_id": period_id,
-        "auditor_id": auditor_id,
-        "dispatch_status": "pending_auditor"
-    })))
+    seal.dispatch_status = "pending_auditor".into();
+    seal.auditor_id = payload.auditor_id;
+    seal.upsert(conn).await?;
+
+    Ok(Json(seal))
 }
 
-/// Rejects an audit proposal and returns notes to the controller.
+/// Rejects a proposed seal during audit review with explanatory notes.
 async fn reject_seal(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -224,7 +222,7 @@ async fn reject_seal(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if auth.role != "auditor" && auth.role != "owner" && auth.role != "admin" {
         return Err(ApiError::Forbidden(
-            "Only the assigned Auditor or Admin can reject a proposed close".into(),
+            "Only authorized Auditors or Organization Owners can reject a period seal".into(),
         ));
     }
 
@@ -242,7 +240,7 @@ async fn reject_seal(
 /// Records one approver's cryptographic signature against the proposed seal.
 async fn approve_seal(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Path(period_id): Path<String>,
     Json(payload): Json<ApproveRequest>,
 ) -> Result<Json<ApproveResponse>, ApiError> {
@@ -277,34 +275,37 @@ async fn approve_seal(
 
             (format!("0x{pk_clean}"), format!("0x{sig_clean}"))
         }
-        _ => match &payload.wallet_id {
-            Some(wid) => {
-                let privy = state.privy.as_ref().ok_or_else(|| {
-                    ApiError::Internal("Privy client is not configured on this server".into())
+        _ => {
+            let wallet_id = payload
+                .wallet_id
+                .as_ref()
+                .or(auth.user.wallet_id.as_ref())
+                .ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "Must provide (approver_pubkey, signature) or authenticated user must have an associated wallet_id".into(),
+                    )
                 })?;
 
-                let st_hash_clean = seal.statement_hash.trim_start_matches("0x");
-                let st_hash_vec = hex::decode(st_hash_clean)
-                    .map_err(|_| ApiError::Internal("Invalid statement hash in db".into()))?;
-                let mut st_hash_bytes = [0u8; 32];
-                st_hash_bytes.copy_from_slice(&st_hash_vec);
+            let privy = state.privy.as_ref().ok_or_else(|| {
+                ApiError::Internal("Privy client is not configured on this server".into())
+            })?;
 
-                let (sig_64, recovered_info) = privy
-                    .sign_hash(wid, &st_hash_bytes)
-                    .await
-                    .map_err(|e| ApiError::Internal(format!("Privy signing error: {e}")))?;
+            let st_hash_clean = seal.statement_hash.trim_start_matches("0x");
+            let st_hash_vec = hex::decode(st_hash_clean)
+                .map_err(|_| ApiError::Internal("Invalid statement hash in db".into()))?;
+            let mut st_hash_bytes = [0u8; 32];
+            st_hash_bytes.copy_from_slice(&st_hash_vec);
 
-                (
-                    recovered_info.compressed_pubkey_hex,
-                    format!("0x{}", hex::encode(sig_64)),
-                )
-            }
-            None => {
-                return Err(ApiError::BadRequest(
-                    "Must provide either (approver_pubkey, signature) or wallet_id".into(),
-                ));
-            }
-        },
+            let (sig_64, recovered_info) = privy
+                .sign_hash(wallet_id, &st_hash_bytes)
+                .await
+                .map_err(|e| ApiError::Internal(format!("Privy signing error: {e}")))?;
+
+            (
+                recovered_info.compressed_pubkey_hex,
+                format!("0x{}", hex::encode(sig_64)),
+            )
+        }
     };
 
     // Four-Eyes Principle / Separation of Duties (Anti-Self-Approval)
@@ -350,8 +351,8 @@ async fn approve_seal(
         seal.approver_2_pubkey.is_some(),
     ) {
         (true, true) => 2,
-        (true, false) => 1,
-        _ => 0,
+        (true, false) | (false, true) => 1,
+        (false, false) => 0,
     };
 
     Ok(Json(ApproveResponse {
@@ -365,8 +366,15 @@ async fn approve_seal(
 /// Publishes the dual-signed seal statement to Hedera Consensus Service.
 async fn publish_seal(
     State(state): State<AppState>,
+    auth: AuthContext,
     Path(period_id): Path<String>,
 ) -> Result<Json<PublishResponse>, ApiError> {
+    if auth.role == "staff" {
+        return Err(ApiError::Forbidden(
+            "Staff members cannot publish seals to Hedera Consensus Service".into(),
+        ));
+    }
+
     let (period, mut seal, entries) = {
         let conn = state.db.conn();
         let p = PeriodRecord::find_by_id(conn, &period_id).await?;

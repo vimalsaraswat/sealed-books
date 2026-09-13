@@ -11,7 +11,6 @@ import {
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
 import { formatCurrency, truncateHash, getHashscanUrl } from "../../lib/utils";
-import { signStatementHash, getUserSigningKey } from "../../lib/signer";
 import type { StatementResponse, SealRecord } from "../../types";
 import {
   ShieldCheck,
@@ -29,9 +28,10 @@ export interface AuditorReviewModalProps {
   onOpenChange: (open: boolean) => void;
   statementResponse: StatementResponse | null;
   seal: SealRecord | null;
-  onApproveAndPublish: (data: {
-    approver_pubkey: string;
-    signature: string;
+  onApproveAndPublish: (data?: {
+    approver_pubkey?: string;
+    signature?: string;
+    wallet_id?: string;
   }) => Promise<SealRecord>;
   onReject: (notes: string) => Promise<void>;
   onSuccessDone?: () => void;
@@ -54,8 +54,7 @@ export function AuditorReviewModal({
   const [publishedSeal, setPublishedSeal] = useState<SealRecord | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const auditorId = currentUser?.id || "usr_bob";
-  const auditorKey = getUserSigningKey(auditorId);
+
 
   useEffect(() => {
     if (open) {
@@ -82,15 +81,8 @@ export function AuditorReviewModal({
         throw new Error("Missing statement hash to sign.");
       }
 
-      const { signatureHex, pubkeyHex } = signStatementHash(
-        statementHash,
-        auditorKey,
-      );
-
-      const resultSeal = await onApproveAndPublish({
-        approver_pubkey: pubkeyHex,
-        signature: signatureHex,
-      });
+      // Automatically signed via Auditor Privy Server Wallet Policy and published to Hedera HCS
+      const resultSeal = await onApproveAndPublish();
 
       setPublishedSeal(resultSeal);
       if (onSuccessDone) {
@@ -302,8 +294,8 @@ export function AuditorReviewModal({
                 </span>
               </div>
               <p className="text-[11px] text-muted-foreground">
-                Controller Alice has signed this canonical statement. Your
-                co-signature will complete the 2-of-2 multi-sig quorum and
+                The Financial Controller has signed this canonical statement. Your
+                statutory co-signature as {currentUser?.name || "Independent Auditor"} will complete the 2-of-2 multi-sig quorum and
                 anchor the seal to Hedera Consensus Service.
               </p>
             </div>

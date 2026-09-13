@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
         .route("/:id/statement", get(get_period_statement))
         .route("/:id/verify", get(verify_period_handler))
         .route("/:id/tamper", post(tamper_period_handler))
+        .route("/:id/simulate-tamper", post(tamper_period_handler))
         .nest("/:id/entries", entries::router())
         .nest("/:id/seal", seal::router())
 }

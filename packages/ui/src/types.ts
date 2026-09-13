@@ -240,7 +240,9 @@ export interface User {
   id: string;
   email: string;
   name: string;
+  pubkey?: string;
   eth_address: string;
+  wallet_id?: string;
   role: UserRole;
   is_active: boolean;
   created_at: string;
@@ -341,7 +343,7 @@ export interface ApiClient {
   proposeSeal(id: string): Promise<ProposeResponse>;
   approveSeal(
     id: string,
-    payload: { approver_pubkey: string; signature: string },
+    payload?: { approver_pubkey?: string; signature?: string; wallet_id?: string },
   ): Promise<ApproveResponse>;
   dispatchSeal(periodId: string, auditorId: string): Promise<SealRecord>;
   rejectSeal(periodId: string, notes: string): Promise<SealRecord>;

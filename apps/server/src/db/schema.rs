@@ -21,6 +21,7 @@ pub async fn migrate(conn: &Connection) -> Result<(), libsql::Error> {
             name TEXT NOT NULL,
             pubkey TEXT NOT NULL,
             eth_address TEXT NOT NULL,
+            wallet_id TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -54,7 +55,7 @@ pub async fn migrate(conn: &Connection) -> Result<(), libsql::Error> {
         -- Chart of accounts (Scoped to organization)
         CREATE TABLE IF NOT EXISTS accounts (
             id TEXT PRIMARY KEY,
-            organization_id TEXT NOT NULL DEFAULT 'org_acme' REFERENCES organizations(id),
+            organization_id TEXT NOT NULL REFERENCES organizations(id),
             code TEXT NOT NULL,
             name TEXT NOT NULL,
             account_type TEXT NOT NULL CHECK(account_type IN ('asset', 'liability', 'equity', 'revenue', 'expense')),
@@ -64,7 +65,7 @@ pub async fn migrate(conn: &Connection) -> Result<(), libsql::Error> {
         -- Accounting periods (Scoped to organization)
         CREATE TABLE IF NOT EXISTS periods (
             id TEXT PRIMARY KEY,
-            organization_id TEXT NOT NULL DEFAULT 'org_acme' REFERENCES organizations(id),
+            organization_id TEXT NOT NULL REFERENCES organizations(id),
             entity TEXT NOT NULL,
             start_date TEXT NOT NULL,
             end_date TEXT NOT NULL,
@@ -120,31 +121,7 @@ pub async fn migrate(conn: &Connection) -> Result<(), libsql::Error> {
     )
     .await?;
 
-    // Safe backwards-compatible column migrations for existing database files
-    let _ = conn
-        .execute(
-            "ALTER TABLE accounts ADD COLUMN organization_id TEXT DEFAULT 'org_acme';",
-            (),
-        )
-        .await;
-    let _ = conn
-        .execute(
-            "ALTER TABLE periods ADD COLUMN organization_id TEXT DEFAULT 'org_acme';",
-            (),
-        )
-        .await;
-    let _ = conn
-        .execute(
-            "ALTER TABLE seals ADD COLUMN dispatch_status TEXT DEFAULT 'draft';",
-            (),
-        )
-        .await;
-    let _ = conn
-        .execute("ALTER TABLE seals ADD COLUMN auditor_id TEXT;", ())
-        .await;
-    let _ = conn
-        .execute("ALTER TABLE seals ADD COLUMN auditor_notes TEXT;", ())
-        .await;
+
 
     // Apply indexes after table definitions and column migrations
     conn.execute_batch(

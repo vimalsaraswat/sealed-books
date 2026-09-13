@@ -68,7 +68,7 @@ impl Membership {
         let mut rows = conn
             .query(
                 "SELECT m.id, m.organization_id, m.user_id, m.role, m.status, m.created_at,
-                        u.id, u.email, u.name, u.pubkey, u.eth_address, u.created_at
+                        u.id, u.email, u.name, u.pubkey, u.eth_address, u.wallet_id, u.created_at
                  FROM organization_memberships m
                  JOIN users u ON m.user_id = u.id
                  WHERE m.organization_id = ?1
@@ -94,7 +94,8 @@ impl Membership {
                     name: row.get(8)?,
                     pubkey: row.get(9)?,
                     eth_address: row.get(10)?,
-                    created_at: row.get(11)?,
+                    wallet_id: row.get(11)?,
+                    created_at: row.get(12)?,
                 },
             ));
         }

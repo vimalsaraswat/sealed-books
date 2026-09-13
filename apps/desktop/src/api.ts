@@ -264,7 +264,7 @@ export const api: ApiClient = {
 
   async approveSeal(
     id: string,
-    payload: { approver_pubkey: string; signature: string },
+    payload?: { approver_pubkey?: string; signature?: string; wallet_id?: string },
   ): Promise<{
     period_id: string;
     approver_pubkey: string;
@@ -278,7 +278,7 @@ export const api: ApiClient = {
       quorum_met: boolean;
     }>(`/api/periods/${id}/seal/approve`, {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify(payload ?? {}),
     });
   },
 
