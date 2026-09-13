@@ -64,10 +64,9 @@ export function SealProposalDialog({
   const [selectedAuditorId, setSelectedAuditorId] = useState<string>("");
 
 
-  // Reset state and load auditors on open
+  // Reset state and load auditors only when dialog is first opened or activeOrg changes
   useEffect(() => {
     if (open) {
-      setApprovals(new Map());
       setSigningId(null);
       setIsDispatching(false);
       setIsDispatched(seal?.dispatch_status === "pending_auditor");
@@ -84,8 +83,10 @@ export function SealProposalDialog({
           })
           .catch(console.error);
       }
+    } else {
+      setApprovals(new Map());
     }
-  }, [open, seal, activeOrg, api]);
+  }, [open, activeOrg, api]);
 
   if (!proposal) return null;
 

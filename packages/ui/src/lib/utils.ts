@@ -37,14 +37,19 @@ export function getHashscanUrl(options: {
   topicId?: string | null;
   rawUrl?: string | null;
 }): string | null {
-  if (options.consensusTimestamp && options.consensusTimestamp.trim().length > 0) {
+  // If consensusTimestamp is valid Hedera format (e.g. 1789299468.637783404), link directly to transaction
+  if (
+    options.consensusTimestamp &&
+    options.consensusTimestamp.trim().length > 0 &&
+    !options.consensusTimestamp.includes("T")
+  ) {
     return `https://hashscan.io/testnet/transaction/${options.consensusTimestamp.trim()}`;
-  }
-  if (options.rawUrl && !options.rawUrl.includes("/message/")) {
-    return options.rawUrl;
   }
   if (options.topicId && options.topicId.trim().length > 0) {
     return `https://hashscan.io/testnet/topic/${options.topicId.trim()}`;
+  }
+  if (options.rawUrl && !options.rawUrl.includes("/message/")) {
+    return options.rawUrl;
   }
   return null;
 }

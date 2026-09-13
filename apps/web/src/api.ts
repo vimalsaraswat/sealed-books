@@ -212,7 +212,11 @@ export const api = {
 
   async getPeriodSeal(id: string): Promise<SealRecord | null> {
     try {
-      return await request<SealRecord>(`/api/periods/${id}/seal`);
+      const res = await request<{ seal?: SealRecord | null } | SealRecord>(`/api/periods/${id}/seal`);
+      if (res && "seal" in res) {
+        return res.seal ?? null;
+      }
+      return (res as SealRecord) ?? null;
     } catch {
       return null;
     }

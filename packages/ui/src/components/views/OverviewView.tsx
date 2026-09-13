@@ -1,42 +1,50 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { useLedger } from "../../context/LedgerContext";
+import { useAuth } from "../../context/AuthContext";
+import { useModals } from "../../context/ModalContext";
 import {
-  Lock,
-  FileSpreadsheet,
-  Clock,
-  AlertTriangle,
-  ShieldCheck,
-  ArrowUpRight,
-  Plus,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "../ui/card";
+import { Button } from "../ui/button";
+import { Badge } from "../ui/badge";
+import { formatCurrency, formatDate } from "../../lib/utils";
+import {
+  TrendingUp,
+  TrendingDown,
   Scale,
-  BookOpen,
-  ArrowRight,
+  Hash,
+  ShieldCheck,
   Award,
+  Lock,
+  Plus,
+  ArrowRight,
+  Clock,
+  ArrowUpRight,
+  BookOpen,
+  FileSpreadsheet,
   CheckCircle2,
   CircleDot,
-  Hash,
-  Activity,
   Layers,
+  AlertTriangle,
 } from "lucide-react";
-import { Badge } from "../ui/badge";
-import { Button } from "../ui/button";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../ui/card";
-import { formatCurrency } from "../../lib/utils";
-import { useAuth } from "../../context/AuthContext";
-import { useLedger } from "../../context/LedgerContext";
-import { useModals } from "../../context/ModalContext";
 
 export function OverviewView() {
-  const { userRole } = useAuth();
   const {
     currentPeriod,
     entries,
     accounts,
     seal,
-    isVerifying,
     setActiveTab,
     handleOpenCloseDialog,
     handleVerify,
   } = useLedger();
+
+  const { userRole } = useAuth();
+  const [isVerifying, setIsVerifying] = useState(false);
 
   const {
     setIsAddEntryOpen,
@@ -48,7 +56,12 @@ export function OverviewView() {
 
   const isSealed = currentPeriod?.status === "sealed";
   const isAuditor = userRole === "auditor";
-  const isPendingAuditor = seal?.dispatch_status === "pending_auditor";
+  const hasControllerSigned = Boolean(
+    seal?.approver_1_pubkey && seal?.approver_1_sig,
+  );
+  const isPendingAuditor =
+    seal?.dispatch_status === "pending_auditor" ||
+    (hasControllerSigned && !isSealed);
   const isRejected = seal?.dispatch_status === "rejected";
 
   // Compute total debits and credits across all entries in the period
@@ -77,14 +90,6 @@ export function OverviewView() {
     return [...entries].slice(0, 5);
   }, [entries]);
 
-  const accountMap = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const acc of accounts) {
-      map.set(acc.id, `${acc.code} ${acc.name}`);
-    }
-    return map;
-  }, [accounts]);
-
   const handleProposeClose = async () => {
     const propStmt = await handleOpenCloseDialog();
     if (propStmt) {
@@ -93,9 +98,14 @@ export function OverviewView() {
   };
 
   const handleRunVerification = async () => {
-    const rep = await handleVerify();
-    if (rep) {
-      setIsVerifyModalOpen(true);
+    try {
+      setIsVerifying(true);
+      const rep = await handleVerify();
+      if (rep) {
+        setIsVerifyModalOpen(true);
+      }
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -133,8 +143,8 @@ export function OverviewView() {
           isSealed
             ? "border-emerald-500/30 bg-emerald-500/5 dark:bg-emerald-950/20"
             : isPendingAuditor
-            ? "border-amber-500/30 bg-amber-500/5 dark:bg-amber-950/20"
-            : "border-primary/20 bg-primary/5 dark:bg-primary/10"
+              ? "border-amber-500/30 bg-amber-500/5 dark:bg-amber-950/20"
+              : "border-primary/20 bg-primary/5 dark:bg-primary/10"
         }`}
       >
         <CardContent className="p-5 sm:p-6">
@@ -175,8 +185,8 @@ export function OverviewView() {
                 )}
               </div>
               <p className="text-xs text-muted-foreground font-mono">
-                Period: {currentPeriod.start_date} to {currentPeriod.end_date} • ID:{" "}
-                {currentPeriod.id}
+                Period: {currentPeriod.start_date} to {currentPeriod.end_date} •
+                ID: {currentPeriod.id}
               </p>
             </div>
 
@@ -212,7 +222,9 @@ export function OverviewView() {
                     className="text-xs gap-1.5 h-9 bg-emerald-600 hover:bg-emerald-700 text-white dark:bg-emerald-600 dark:hover:bg-emerald-500"
                   >
                     <ShieldCheck className="size-4" />
-                    <span>{isVerifying ? "Verifying..." : "Verify on Hedera"}</span>
+                    <span>
+                      {isVerifying ? "Verifying..." : "Verify on Hedera"}
+                    </span>
                   </Button>
                 </>
               ) : isPendingAuditor ? (
@@ -278,9 +290,10 @@ export function OverviewView() {
             </CardTitle>
           </CardHeader>
           <CardContent className="p-4 pt-1">
-            <p className="text-[11px] text-muted-foreground font-mono">
-              Sum of debit postings
-            </p>
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <TrendingUp className="size-3.5 text-blue-500" />
+              <span>Cumulative turnover</span>
+            </div>
           </CardContent>
         </Card>
 
@@ -295,82 +308,99 @@ export function OverviewView() {
             </CardTitle>
           </CardHeader>
           <CardContent className="p-4 pt-1">
-            <p className="text-[11px] text-muted-foreground font-mono">
-              Sum of credit postings
-            </p>
-          </CardContent>
-        </Card>
-
-        {/* Balance Equilibrium */}
-        <Card className="border-border shadow-xs">
-          <CardHeader className="p-4 pb-1">
-            <CardDescription className="text-xs font-medium uppercase font-mono tracking-wider">
-              Equilibrium Status
-            </CardDescription>
-            <div className="flex items-center gap-2 pt-0.5">
-              {isBalanced ? (
-                <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-bold text-lg font-mono">
-                  <CheckCircle2 className="size-5" />
-                  <span>BALANCED</span>
-                </div>
-              ) : (
-                <div className="flex items-center gap-1.5 text-destructive font-bold text-lg font-mono">
-                  <AlertTriangle className="size-5" />
-                  <span>{formatCurrency(Math.abs(variance))}</span>
-                </div>
-              )}
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <TrendingDown className="size-3.5 text-emerald-500" />
+              <span>Cumulative turnover</span>
             </div>
-          </CardHeader>
-          <CardContent className="p-4 pt-1">
-            <p className="text-[11px] text-muted-foreground font-mono">
-              {isBalanced
-                ? "Debits == Credits (Zero Variance)"
-                : "Ledger out of balance"}
-            </p>
           </CardContent>
         </Card>
 
-        {/* Transaction Volume */}
-        <Card className="border-border shadow-xs">
+        {/* Trial Balance Invariance */}
+        <Card
+          className={`border shadow-xs ${
+            isBalanced
+              ? "border-emerald-500/20 bg-emerald-500/5 dark:bg-emerald-950/10"
+              : "border-destructive/20 bg-destructive/5 dark:bg-destructive/10"
+          }`}
+        >
           <CardHeader className="p-4 pb-1">
             <CardDescription className="text-xs font-medium uppercase font-mono tracking-wider">
-              Transactions & Accounts
+              Trial Balance Delta
             </CardDescription>
-            <CardTitle className="text-2xl font-bold font-mono tracking-tight text-foreground">
-              {entries.length}{" "}
-              <span className="text-xs font-normal text-muted-foreground">entries</span>
+            <CardTitle
+              className={`text-2xl font-bold font-mono tracking-tight ${
+                isBalanced
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-destructive"
+              }`}
+            >
+              {isBalanced ? "$0.00" : formatCurrency(variance)}
             </CardTitle>
           </CardHeader>
           <CardContent className="p-4 pt-1">
-            <p className="text-[11px] text-muted-foreground font-mono">
-              Across {accounts.length} chart accounts
-            </p>
+            <div className="flex items-center gap-1.5 text-xs font-medium">
+              <Scale
+                className={`size-3.5 ${
+                  isBalanced ? "text-emerald-500" : "text-destructive"
+                }`}
+              />
+              <span
+                className={
+                  isBalanced
+                    ? "text-emerald-600 dark:text-emerald-400"
+                    : "text-destructive"
+                }
+              >
+                {isBalanced
+                  ? "Zero Invariance Satisfied"
+                  : "Unbalanced Ledger!"}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Total Ledger Entries */}
+        <Card className="border-border shadow-xs">
+          <CardHeader className="p-4 pb-1">
+            <CardDescription className="text-xs font-medium uppercase font-mono tracking-wider">
+              Recorded Entries
+            </CardDescription>
+            <CardTitle className="text-2xl font-bold font-mono tracking-tight text-foreground">
+              {entries.length}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-4 pt-1">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Hash className="size-3.5 text-primary" />
+              <span>Double-entry batches</span>
+            </div>
           </CardContent>
         </Card>
       </div>
 
       {/* =========================================================
-          3. PERIOD MILESTONE ATTESTATION STEPPER
+          3. PERIOD STATUS & AUDIT PIPELINE STEPPER
           ========================================================= */}
       <Card className="border-border shadow-xs">
-        <CardHeader className="p-5 pb-3">
-          <CardTitle className="text-sm font-semibold text-foreground flex items-center gap-2">
-            <Activity className="size-4 text-primary" />
-            <span>Cryptographic Close Lifecycle</span>
+        <CardHeader className="p-4 pb-2">
+          <CardTitle className="text-sm font-semibold tracking-tight text-foreground">
+            Cryptographic Sealing Pipeline
           </CardTitle>
           <CardDescription className="text-xs text-muted-foreground">
-            Multi-party attestation progress for {currentPeriod.id}
+            Current stage in the four-eyes dual-signature closing workflow.
           </CardDescription>
         </CardHeader>
-        <CardContent className="p-5 pt-1">
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+        <CardContent className="p-4 pt-1">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             {/* Step 1 */}
             <div className="p-3 rounded-lg border border-border/60 bg-muted/20 flex items-start gap-3">
               <CheckCircle2 className="size-5 text-emerald-500 shrink-0 mt-0.5" />
               <div className="space-y-0.5">
-                <p className="text-xs font-semibold text-foreground">1. Period Setup</p>
+                <p className="text-xs font-semibold text-foreground">
+                  1. Chart of Accounts
+                </p>
                 <p className="text-[11px] text-muted-foreground">
-                  {currentPeriod.start_date} to {currentPeriod.end_date}
+                  {accounts.length} configured accounts
                 </p>
               </div>
             </div>
@@ -383,7 +413,9 @@ export function OverviewView() {
                 <CircleDot className="size-5 text-amber-500 shrink-0 mt-0.5" />
               )}
               <div className="space-y-0.5">
-                <p className="text-xs font-semibold text-foreground">2. Post Entries</p>
+                <p className="text-xs font-semibold text-foreground">
+                  2. Post Entries
+                </p>
                 <p className="text-[11px] text-muted-foreground">
                   {entries.length} balanced transactions
                 </p>
@@ -392,15 +424,19 @@ export function OverviewView() {
 
             {/* Step 3 */}
             <div className="p-3 rounded-lg border border-border/60 bg-muted/20 flex items-start gap-3">
-              {isSealed || isPendingAuditor ? (
+              {isSealed || hasControllerSigned || isPendingAuditor ? (
                 <CheckCircle2 className="size-5 text-emerald-500 shrink-0 mt-0.5" />
               ) : (
                 <CircleDot className="size-5 text-muted-foreground shrink-0 mt-0.5" />
               )}
               <div className="space-y-0.5">
-                <p className="text-xs font-semibold text-foreground">3. Controller Close</p>
+                <p className="text-xs font-semibold text-foreground">
+                  3. Controller Close
+                </p>
                 <p className="text-[11px] text-muted-foreground">
-                  {isSealed || isPendingAuditor ? "Approver 1 signed" : "Pending proposal"}
+                  {isSealed || hasControllerSigned || isPendingAuditor
+                    ? "Approver 1 signed"
+                    : "Pending proposal"}
                 </p>
               </div>
             </div>
@@ -415,7 +451,9 @@ export function OverviewView() {
                 <CircleDot className="size-5 text-muted-foreground shrink-0 mt-0.5" />
               )}
               <div className="space-y-0.5">
-                <p className="text-xs font-semibold text-foreground">4. Hedera Seal</p>
+                <p className="text-xs font-semibold text-foreground">
+                  4. Hedera Seal
+                </p>
                 <p className="text-[11px] text-muted-foreground">
                   {isSealed ? "Anchored to HCS" : "Requires 2-of-2"}
                 </p>
@@ -461,39 +499,29 @@ export function OverviewView() {
                 return (
                   <div
                     key={entry.id}
-                    onClick={() => setActiveTab("ledger")}
-                    className="p-3.5 hover:bg-muted/40 transition-colors cursor-pointer flex items-center justify-between gap-4"
+                    className="p-3.5 hover:bg-muted/30 transition-colors flex items-center justify-between gap-4"
                   >
-                    <div className="min-w-0 space-y-1">
+                    <div className="space-y-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold font-mono text-foreground">
-                          {entry.date}
-                        </span>
-                        <span className="text-[11px] font-mono text-muted-foreground flex items-center gap-0.5">
-                          <Hash className="size-2.5" />
+                        <span className="font-mono text-xs font-bold text-foreground">
                           {entry.id}
                         </span>
+                        <span className="text-[11px] text-muted-foreground font-mono">
+                          {formatDate(entry.date)}
+                        </span>
                       </div>
-                      <p className="text-xs text-foreground font-medium truncate max-w-md">
+                      <p className="text-xs text-muted-foreground truncate">
                         {entry.description}
                       </p>
-                      <div className="flex items-center gap-2 text-[10px] text-muted-foreground font-mono truncate">
-                        {entry.lines.slice(0, 2).map((l, i) => (
-                          <span key={i} className="truncate">
-                            {accountMap.get(l.account_id) || "Account"} ({l.direction})
-                          </span>
-                        ))}
-                        {entry.lines.length > 2 && (
-                          <span>+{entry.lines.length - 2} more lines</span>
-                        )}
-                      </div>
                     </div>
 
                     <div className="text-right shrink-0">
-                      <span className="text-xs font-bold font-mono text-foreground">
+                      <span className="font-mono text-xs font-semibold text-foreground">
                         {formatCurrency(totalDebitMinor)}
                       </span>
-                      <p className="text-[10px] text-muted-foreground font-mono">balanced</p>
+                      <p className="text-[10px] text-muted-foreground font-mono">
+                        {entry.lines.length} lines
+                      </p>
                     </div>
                   </div>
                 );
@@ -502,60 +530,52 @@ export function OverviewView() {
           </div>
         </div>
 
-        {/* Right Col: Quick Financials & Consensus Links */}
-        <div className="space-y-4">
-          {/* Financial Statements Card */}
-          <Card className="border-border shadow-xs">
-            <CardHeader className="p-4 pb-2">
-              <CardTitle className="text-xs font-semibold uppercase font-mono tracking-wider flex items-center gap-1.5">
-                <Scale className="size-3.5 text-primary" />
-                <span>Financial Statements</span>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-4 pt-1 space-y-3">
-              <p className="text-xs text-muted-foreground">
-                Examine debit and credit balances across active asset, liability, and equity accounts.
-              </p>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setActiveTab("financials")}
-                className="w-full text-xs justify-between"
-              >
-                <span>Open Trial Balance & Accounts</span>
-                <ArrowRight className="size-3" />
-              </Button>
-            </CardContent>
-          </Card>
+        {/* Right Col: Accounting Period Summary Card */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+            <FileSpreadsheet className="size-4 text-primary" />
+            <span>Period Information</span>
+          </h3>
 
-          {/* Hedera Consensus Card */}
-          <Card className="border-border shadow-xs">
-            <CardHeader className="p-4 pb-2">
-              <CardTitle className="text-xs font-semibold uppercase font-mono tracking-wider flex items-center gap-1.5">
-                <ShieldCheck className="size-3.5 text-primary" />
-                <span>Hedera Consensus Anchor</span>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-4 pt-1 space-y-3">
-              <div className="p-2 rounded bg-muted/50 font-mono text-[11px] space-y-1">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Topic:</span>
-                  <span className="text-foreground font-semibold">0.0.10462941</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Quorum:</span>
-                  <span className="text-foreground">2-of-2 secp256k1</span>
-                </div>
+          <Card className="border-border bg-card shadow-xs">
+            <CardContent className="p-4 space-y-3 text-xs">
+              <div className="flex items-center justify-between pb-2 border-b border-border">
+                <span className="text-muted-foreground">Reporting Entity</span>
+                <span className="font-semibold text-foreground text-right">
+                  {currentPeriod.entity}
+                </span>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setActiveTab("audit")}
-                className="w-full text-xs justify-between"
-              >
-                <span>Audit & Consensus Center</span>
-                <ArrowRight className="size-3" />
-              </Button>
+              <div className="flex items-center justify-between pb-2 border-b border-border">
+                <span className="text-muted-foreground">Start Date</span>
+                <span className="font-mono text-foreground">
+                  {currentPeriod.start_date}
+                </span>
+              </div>
+              <div className="flex items-center justify-between pb-2 border-b border-border">
+                <span className="text-muted-foreground">End Date</span>
+                <span className="font-mono text-foreground">
+                  {currentPeriod.end_date}
+                </span>
+              </div>
+              <div className="flex items-center justify-between pb-2 border-b border-border">
+                <span className="text-muted-foreground">Period Status</span>
+                <Badge
+                  variant={isSealed ? "sealed" : "default"}
+                  className="font-mono text-[10px]"
+                >
+                  {currentPeriod.status.toUpperCase()}
+                </Badge>
+              </div>
+              {seal?.statement_hash && (
+                <div className="pt-1 space-y-1">
+                  <span className="text-muted-foreground text-[11px]">
+                    Statement Pre-Hash
+                  </span>
+                  <div className="p-2 rounded bg-muted/50 border border-border/50 font-mono text-[10px] break-all text-foreground">
+                    {seal.statement_hash}
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

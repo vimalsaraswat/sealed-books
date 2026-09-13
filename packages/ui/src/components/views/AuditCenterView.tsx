@@ -50,7 +50,10 @@ export function AuditCenterView() {
 
   const isSealed = currentPeriod?.status === "sealed";
   const isAuditor = userRole === "auditor";
-  const isPendingAuditor = seal?.dispatch_status === "pending_auditor";
+  const hasControllerSigned = Boolean(seal?.approver_1_pubkey && seal?.approver_1_sig);
+  const isPendingAuditor =
+    seal?.dispatch_status === "pending_auditor" ||
+    (hasControllerSigned && !isSealed);
 
   const handleCopy = (key: string, text: string) => {
     navigator.clipboard.writeText(text);

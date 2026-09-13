@@ -157,22 +157,31 @@ async fn propose_seal(
     let human_readable = statement.to_human_readable();
 
     let seal_id = format!("seal_{period_id}");
-    let seal = SealRecord {
-        id: seal_id,
-        period_id: period_id.clone(),
-        root: ledger_root_hex,
-        statement_hash: statement_hash_hex.clone(),
-        topic_id: None,
-        sequence_number: None,
-        consensus_timestamp: None,
-        approver_1_pubkey: None,
-        approver_1_sig: None,
-        approver_2_pubkey: None,
-        approver_2_sig: None,
-        dispatch_status: "draft".into(),
-        auditor_id: None,
-        auditor_notes: None,
-        created_at: Utc::now().to_rfc3339(),
+    let existing_seal = SealRecord::find_by_period_id(conn, &period_id).await.ok();
+
+    let seal = match existing_seal {
+        Some(mut s) => {
+            s.root = ledger_root_hex;
+            s.statement_hash = statement_hash_hex.clone();
+            s
+        }
+        None => SealRecord {
+            id: seal_id,
+            period_id: period_id.clone(),
+            root: ledger_root_hex,
+            statement_hash: statement_hash_hex.clone(),
+            topic_id: None,
+            sequence_number: None,
+            consensus_timestamp: None,
+            approver_1_pubkey: None,
+            approver_1_sig: None,
+            approver_2_pubkey: None,
+            approver_2_sig: None,
+            dispatch_status: "draft".into(),
+            auditor_id: None,
+            auditor_notes: None,
+            created_at: Utc::now().to_rfc3339(),
+        },
     };
 
     seal.upsert(conn).await?;
@@ -449,6 +458,12 @@ async fn publish_seal(
         .await
         .map_err(|e| ApiError::Internal(format!("Hedera consensus broadcast failed: {e}")))?;
 
+    // Query mirror node to fetch the canonical Hedera consensus timestamp (e.g. 1789299468.637783404)
+    let consensus_timestamp = match state.mirror.fetch_message(&receipt.topic_id, receipt.sequence_number).await {
+        Ok((ts, _)) => ts,
+        Err(_) => receipt.consensus_timestamp.clone(),
+    };
+
     // Persist baseline leaf hashes and mark period immutable
     {
         let conn = state.db.conn();
@@ -464,17 +479,17 @@ async fn publish_seal(
 
         seal.topic_id = Some(receipt.topic_id.clone());
         seal.sequence_number = Some(receipt.sequence_number as i64);
-        seal.consensus_timestamp = Some(receipt.consensus_timestamp.clone());
+        seal.consensus_timestamp = Some(consensus_timestamp.clone());
         seal.dispatch_status = "sealed".into();
         seal.upsert(conn).await?;
 
         PeriodRecord::mark_sealed(conn, &period_id).await?;
     }
 
-    let hashscan_url = if !receipt.consensus_timestamp.is_empty() {
+    let hashscan_url = if !consensus_timestamp.is_empty() && !consensus_timestamp.contains("T") {
         format!(
             "https://hashscan.io/testnet/transaction/{}",
-            receipt.consensus_timestamp
+            consensus_timestamp
         )
     } else {
         format!("https://hashscan.io/testnet/topic/{}", receipt.topic_id)
@@ -484,7 +499,7 @@ async fn publish_seal(
         status: "published".into(),
         topic_id: receipt.topic_id,
         sequence_number: receipt.sequence_number,
-        consensus_timestamp: receipt.consensus_timestamp,
+        consensus_timestamp,
         transaction_id: receipt.transaction_id,
         hashscan_url,
         payload_bytes_len: encoded_bytes.len(),
