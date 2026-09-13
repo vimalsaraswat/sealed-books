@@ -53,23 +53,59 @@ pub async fn seed_auth_tenancy(conn: &Connection) -> Result<(), DbError> {
     let _ = org1.insert(conn).await;
     let _ = org2.insert(conn).await;
 
-    let approver_1_wid = std::env::var("APPROVER_1_WALLET_ID")
+    // Auto-provision live Privy server wallets if Privy client is configured
+    let privy = crate::privy::PrivyClient::new_from_env().ok();
+
+    let mut approver_1_wid = std::env::var("APPROVER_1_WALLET_ID")
         .or_else(|_| std::env::var("PRIVY_APPROVER_1_WALLET_ID"))
         .ok();
-    let approver_1_addr = std::env::var("APPROVER_1_ADDRESS").unwrap_or_default();
+    let mut approver_1_addr = std::env::var("APPROVER_1_ADDRESS").unwrap_or_default();
     let approver_1_pk = std::env::var("APPROVER_1_PUBKEY").unwrap_or_default();
 
-    let approver_2_wid = std::env::var("APPROVER_2_WALLET_ID")
+    let mut approver_2_wid = std::env::var("APPROVER_2_WALLET_ID")
         .or_else(|_| std::env::var("PRIVY_APPROVER_2_WALLET_ID"))
         .ok();
-    let approver_2_addr = std::env::var("APPROVER_2_ADDRESS").unwrap_or_default();
+    let mut approver_2_addr = std::env::var("APPROVER_2_ADDRESS").unwrap_or_default();
     let approver_2_pk = std::env::var("APPROVER_2_PUBKEY").unwrap_or_default();
 
-    let approver_3_wid = std::env::var("APPROVER_3_WALLET_ID")
+    let mut approver_3_wid = std::env::var("APPROVER_3_WALLET_ID")
         .or_else(|_| std::env::var("PRIVY_APPROVER_3_WALLET_ID"))
         .ok();
-    let approver_3_addr = std::env::var("APPROVER_3_ADDRESS").unwrap_or_default();
+    let mut approver_3_addr = std::env::var("APPROVER_3_ADDRESS").unwrap_or_default();
     let approver_3_pk = std::env::var("APPROVER_3_PUBKEY").unwrap_or_default();
+
+    if let Some(ref p) = privy {
+        if approver_1_wid.is_none() || approver_1_addr.is_empty() {
+            match p.create_ethereum_wallet().await {
+                Ok(w) => {
+                    tracing::info!("Auto-provisioned Privy wallet for Alice (Controller): {}", w.address);
+                    approver_1_wid = Some(w.id);
+                    approver_1_addr = w.address;
+                }
+                Err(e) => tracing::warn!("Failed to auto-provision Privy wallet for Alice: {e}"),
+            }
+        }
+        if approver_2_wid.is_none() || approver_2_addr.is_empty() {
+            match p.create_ethereum_wallet().await {
+                Ok(w) => {
+                    tracing::info!("Auto-provisioned Privy wallet for Bob (Auditor): {}", w.address);
+                    approver_2_wid = Some(w.id);
+                    approver_2_addr = w.address;
+                }
+                Err(e) => tracing::warn!("Failed to auto-provision Privy wallet for Bob: {e}"),
+            }
+        }
+        if approver_3_wid.is_none() || approver_3_addr.is_empty() {
+            match p.create_ethereum_wallet().await {
+                Ok(w) => {
+                    tracing::info!("Auto-provisioned Privy wallet for Diana: {}", w.address);
+                    approver_3_wid = Some(w.id);
+                    approver_3_addr = w.address;
+                }
+                Err(e) => tracing::warn!("Failed to auto-provision Privy wallet for Diana: {e}"),
+            }
+        }
+    }
 
     let users = vec![
         User {
