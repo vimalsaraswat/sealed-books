@@ -276,19 +276,22 @@ async fn approve_seal(
             (format!("0x{pk_clean}"), format!("0x{sig_clean}"))
         }
         _ => {
-            let wallet_id = payload
-                .wallet_id
-                .as_ref()
-                .or(auth.user.wallet_id.as_ref())
-                .ok_or_else(|| {
-                    ApiError::BadRequest(
-                        "Must provide (approver_pubkey, signature) or authenticated user must have an associated wallet_id".into(),
-                    )
-                })?;
-
             let privy = state.privy.as_ref().ok_or_else(|| {
                 ApiError::Internal("Privy client is not configured on this server".into())
             })?;
+
+            let wallet_id = match payload.wallet_id.as_ref().or(auth.user.wallet_id.as_ref()) {
+                Some(wid) => wid.clone(),
+                None => {
+                    // Provision a Privy server wallet on-demand for this authenticated user
+                    let created = privy.create_ethereum_wallet().await.map_err(|e| {
+                        ApiError::Internal(format!("Failed to auto-provision Privy wallet: {e}"))
+                    })?;
+                    let conn = state.db.conn();
+                    let _ = crate::db::repository::user::User::update_wallet(conn, &auth.user.id, &created.id, &created.address).await;
+                    created.id
+                }
+            };
 
             let st_hash_clean = seal.statement_hash.trim_start_matches("0x");
             let st_hash_vec = hex::decode(st_hash_clean)
@@ -297,7 +300,7 @@ async fn approve_seal(
             st_hash_bytes.copy_from_slice(&st_hash_vec);
 
             let (sig_64, recovered_info) = privy
-                .sign_hash(wallet_id, &st_hash_bytes)
+                .sign_hash(&wallet_id, &st_hash_bytes)
                 .await
                 .map_err(|e| ApiError::Internal(format!("Privy signing error: {e}")))?;
 

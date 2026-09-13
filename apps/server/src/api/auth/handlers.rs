@@ -99,6 +99,7 @@ pub async fn post_register(
 
     let resp = provision_user_and_workspace(
         conn,
+        state.privy.as_ref(),
         &email,
         Some(&payload.name),
         payload.organization_name.as_deref(),
@@ -227,6 +228,7 @@ pub async fn post_verify_otp(
     // Brand new user: Automatic registration with default organization
     let resp = provision_user_and_workspace(
         conn,
+        state.privy.as_ref(),
         &email,
         payload.name.as_deref(),
         payload.organization_name.as_deref(),

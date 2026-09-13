@@ -6,36 +6,10 @@ use crate::db::repository::membership::Membership;
 use crate::db::repository::organization::Organization;
 use crate::db::repository::session::Session;
 use crate::db::repository::user::User;
+use crate::privy::PrivyClient;
 use chrono::Utc;
-use k256::ecdsa::SigningKey;
-use k256::elliptic_curve::rand_core::OsRng;
 use libsql::Connection;
-use sha3::{Digest, Keccak256};
 use uuid::Uuid;
-
-/// Generates a real secp256k1 keypair and derives the Ethereum address for a new user.
-pub fn generate_user_identity(email: &str, name: &str) -> User {
-    let signing_key = SigningKey::random(&mut OsRng);
-    let pubkey_bytes = signing_key.verifying_key().to_encoded_point(true);
-    let pubkey_hex = format!("0x{}", hex::encode(pubkey_bytes.as_bytes()));
-
-    let uncompressed = signing_key.verifying_key().to_encoded_point(false);
-    let mut hasher = Keccak256::new();
-    hasher.update(&uncompressed.as_bytes()[1..]);
-    let hash = hasher.finalize();
-    let eth_addr = format!("0x{}", hex::encode(&hash[12..]));
-
-    let user_id = format!("usr_{}", &Uuid::new_v4().simple().to_string()[..8]);
-    User {
-        id: user_id,
-        email: email.to_string(),
-        name: name.to_string(),
-        pubkey: pubkey_hex,
-        eth_address: eth_addr,
-        wallet_id: None,
-        created_at: Utc::now().to_rfc3339(),
-    }
-}
 
 /// Derives a readable display name from an email address (e.g. "elena.rostova@corp.com" -> "Elena Rostova").
 pub fn derive_display_name(email: &str) -> String {
@@ -60,8 +34,10 @@ pub fn derive_display_name(email: &str) -> String {
 }
 
 /// Provisions a new user, their default enterprise organization, owner membership, and active session.
+/// If Privy is configured, provisions an isolated hardware-enclaved Ethereum server wallet.
 pub async fn provision_user_and_workspace(
     conn: &Connection,
+    privy: Option<&PrivyClient>,
     email: &str,
     name_opt: Option<&str>,
     org_name_opt: Option<&str>,
@@ -71,7 +47,24 @@ pub async fn provision_user_and_workspace(
         None => derive_display_name(email),
     };
 
-    let user = generate_user_identity(email, &name);
+    let privy = privy.ok_or_else(|| {
+        ApiError::Internal("Privy client is not configured on this server".into())
+    })?;
+
+    let w = privy.create_ethereum_wallet().await.map_err(|e| {
+        ApiError::Internal(format!("Failed to provision Privy server wallet: {e}"))
+    })?;
+
+    let user_id = format!("usr_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let user = User {
+        id: user_id,
+        email: email.to_string(),
+        name: name.clone(),
+        pubkey: "".to_string(),
+        eth_address: w.address,
+        wallet_id: Some(w.id),
+        created_at: Utc::now().to_rfc3339(),
+    };
     user.insert(conn).await?;
 
     let org_name = match org_name_opt.filter(|s| !s.trim().is_empty()) {

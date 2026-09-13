@@ -54,28 +54,22 @@ pub async fn seed_auth_tenancy(conn: &Connection) -> Result<(), DbError> {
     let _ = org2.insert(conn).await;
 
     let approver_1_wid = std::env::var("APPROVER_1_WALLET_ID")
-        .unwrap_or_else(|_| "pugx9v735lhrtn26245f8glf".to_string());
-    let approver_1_addr = std::env::var("APPROVER_1_ADDRESS")
-        .unwrap_or_else(|_| "0x7bfb3F9E7316377A263e06200d9823E3E7a862b2".to_string());
-    let approver_1_pk = std::env::var("APPROVER_1_PUBKEY").unwrap_or_else(|_| {
-        "0x02e923a5f6d0f2378d4717731a56595bb4419bd0ba1939f98336c0d1e5074a250f".to_string()
-    });
+        .or_else(|_| std::env::var("PRIVY_APPROVER_1_WALLET_ID"))
+        .ok();
+    let approver_1_addr = std::env::var("APPROVER_1_ADDRESS").unwrap_or_default();
+    let approver_1_pk = std::env::var("APPROVER_1_PUBKEY").unwrap_or_default();
 
     let approver_2_wid = std::env::var("APPROVER_2_WALLET_ID")
-        .unwrap_or_else(|_| "a4xct73etu19t7zmxlw8zy5p".to_string());
-    let approver_2_addr = std::env::var("APPROVER_2_ADDRESS")
-        .unwrap_or_else(|_| "0x6e5b360D42B77821E92CC3B38B605CE8C0e98A7D".to_string());
-    let approver_2_pk = std::env::var("APPROVER_2_PUBKEY").unwrap_or_else(|_| {
-        "0x0317211fe7d675008e28ff3c39941151c2017c0934ef85d4eda48ca38325619131".to_string()
-    });
+        .or_else(|_| std::env::var("PRIVY_APPROVER_2_WALLET_ID"))
+        .ok();
+    let approver_2_addr = std::env::var("APPROVER_2_ADDRESS").unwrap_or_default();
+    let approver_2_pk = std::env::var("APPROVER_2_PUBKEY").unwrap_or_default();
 
     let approver_3_wid = std::env::var("APPROVER_3_WALLET_ID")
-        .unwrap_or_else(|_| "bnacv568tvwz2ootvvv6irvt".to_string());
-    let approver_3_addr = std::env::var("APPROVER_3_ADDRESS")
-        .unwrap_or_else(|_| "0x8d25F11A383449fBeD5D395f5e8f8E925c4Bd4fa".to_string());
-    let approver_3_pk = std::env::var("APPROVER_3_PUBKEY").unwrap_or_else(|_| {
-        "0x03e2caec58fb19f16d882dd9ba70e13607483a9977159c18f845ef0d81b88de208".to_string()
-    });
+        .or_else(|_| std::env::var("PRIVY_APPROVER_3_WALLET_ID"))
+        .ok();
+    let approver_3_addr = std::env::var("APPROVER_3_ADDRESS").unwrap_or_default();
+    let approver_3_pk = std::env::var("APPROVER_3_PUBKEY").unwrap_or_default();
 
     let users = vec![
         User {
@@ -84,7 +78,7 @@ pub async fn seed_auth_tenancy(conn: &Connection) -> Result<(), DbError> {
             name: "Alice Chen".into(),
             pubkey: approver_1_pk,
             eth_address: approver_1_addr,
-            wallet_id: Some(approver_1_wid),
+            wallet_id: approver_1_wid,
             created_at: "2026-08-01T00:00:00Z".into(),
         },
         User {
@@ -93,15 +87,15 @@ pub async fn seed_auth_tenancy(conn: &Connection) -> Result<(), DbError> {
             name: "Bob Smith".into(),
             pubkey: approver_2_pk,
             eth_address: approver_2_addr,
-            wallet_id: Some(approver_2_wid),
+            wallet_id: approver_2_wid,
             created_at: "2026-08-01T00:00:00Z".into(),
         },
         User {
             id: "usr_charlie".into(),
             email: "charlie@acmetrading.com".into(),
             name: "Charlie Davis".into(),
-            pubkey: "023c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1".into(),
-            eth_address: "0x5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb".into(),
+            pubkey: "".into(),
+            eth_address: "".into(),
             wallet_id: None,
             created_at: "2026-08-01T00:00:00Z".into(),
         },
@@ -111,7 +105,7 @@ pub async fn seed_auth_tenancy(conn: &Connection) -> Result<(), DbError> {
             name: "Carol Vance".into(),
             pubkey: approver_3_pk,
             eth_address: approver_3_addr,
-            wallet_id: Some(approver_3_wid),
+            wallet_id: approver_3_wid,
             created_at: "2026-08-01T00:00:00Z".into(),
         },
     ];

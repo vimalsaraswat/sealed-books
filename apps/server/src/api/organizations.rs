@@ -199,14 +199,24 @@ async fn invite_member(
                 .name
                 .unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string());
             let pubkey = payload.pubkey.unwrap_or_default();
-            let eth_address = payload.eth_address.unwrap_or_default();
+            let privy = state.privy.as_ref().ok_or_else(|| {
+                ApiError::Internal("Privy client is not configured on this server".into())
+            })?;
+
+            let w = privy.create_ethereum_wallet().await.map_err(|e| {
+                ApiError::Internal(format!("Failed to provision Privy server wallet for invitee: {e}"))
+            })?;
+
+            let wallet_id = Some(w.id);
+            let eth_address = w.address;
+
             let new_user = User {
                 id: uid,
                 email: email.clone(),
                 name,
                 pubkey,
                 eth_address,
-                wallet_id: None,
+                wallet_id,
                 created_at: Utc::now().to_rfc3339(),
             };
             new_user.insert(conn).await?;

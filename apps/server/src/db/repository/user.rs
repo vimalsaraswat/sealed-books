@@ -108,4 +108,19 @@ impl User {
         }
         Ok(users)
     }
+
+    /// Updates a user's wallet_id and eth_address.
+    pub async fn update_wallet(
+        conn: &Connection,
+        user_id: &str,
+        wallet_id: &str,
+        eth_address: &str,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "UPDATE users SET wallet_id = ?1, eth_address = ?2 WHERE id = ?3;",
+            params![wallet_id, eth_address, user_id],
+        )
+        .await?;
+        Ok(())
+    }
 }
